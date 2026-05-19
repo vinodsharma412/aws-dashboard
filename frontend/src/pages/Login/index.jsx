@@ -29,71 +29,94 @@ export default function Login() {
     <div className="login-page">
       <div className="login-card">
 
-        <div className="login-header">
-          <div className="login-logo">M</div>
-          <h1 className="login-title">MyApp</h1>
-          <p className="login-subtitle">Sign in to your account</p>
+        {/* ── Left branding panel ── */}
+        <div className="login-brand">
+          <div className="login-brand-logo">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+              <polyline points="2,24 10,14 16,18 24,8 30,12"
+                stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <circle cx="30" cy="12" r="2.5" fill="#fadb14"/>
+            </svg>
+          </div>
+          <h1 className="login-brand-title">NSE Dashboard</h1>
+          <p className="login-brand-desc">
+            Real-time market intelligence for smarter investing
+          </p>
+          <ul className="login-brand-features">
+            <li><span className="feat-icon">📈</span> Live NSE market data</li>
+            <li><span className="feat-icon">🔍</span> Advanced stock screener</li>
+            <li><span className="feat-icon">📊</span> Technical analysis</li>
+            <li><span className="feat-icon">🔔</span> Smart price alerts</li>
+          </ul>
         </div>
 
-        <form className="login-form" onSubmit={handleSubmit} noValidate>
-          {error && (
-            <div className="alert alert--error">
-              <span className="alert-icon">⚠</span>
-              {error}
-            </div>
-          )}
-
-          <div className="form-group">
-            <label htmlFor="login-username">Username</label>
-            <div className="input-wrapper">
-              <span className="input-icon">👤</span>
-              <input
-                id="login-username"
-                className="form-input"
-                type="text"
-                placeholder="Enter your username"
-                value={username}
-                onChange={e => setUsername(e.target.value)}
-                autoComplete="username"
-                autoFocus
-                required
-              />
-            </div>
+        {/* ── Right form panel ── */}
+        <div className="login-form-panel">
+          <div className="login-form-header">
+            <h2>Welcome back</h2>
+            <p>Sign in to continue to your dashboard</p>
           </div>
 
-          <div className="form-group">
-            <label htmlFor="login-password">Password</label>
-            <div className="input-wrapper">
-              <span className="input-icon">🔒</span>
-              <input
-                id="login-password"
-                className={`form-input${showPass ? '' : ''} has-toggle`}
-                type={showPass ? 'text' : 'password'}
-                placeholder="Enter your password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-              />
-              <button
-                type="button"
-                className="input-toggle"
-                onClick={() => setShowPass(v => !v)}
-                aria-label={showPass ? 'Hide password' : 'Show password'}
-              >
-                {showPass ? '🙈' : '👁️'}
-              </button>
+          <form className="login-form" onSubmit={handleSubmit} noValidate>
+            {error && (
+              <div className="alert alert--error">
+                <span className="alert-icon">⚠</span>
+                {error}
+              </div>
+            )}
+
+            <div className="form-group">
+              <label htmlFor="login-username">Username</label>
+              <div className="input-wrapper">
+                <span className="input-icon">👤</span>
+                <input
+                  id="login-username"
+                  className="form-input"
+                  type="text"
+                  placeholder="Enter your username"
+                  value={username}
+                  onChange={e => setUsername(e.target.value)}
+                  autoComplete="username"
+                  autoFocus
+                  required
+                />
+              </div>
             </div>
+
+            <div className="form-group">
+              <label htmlFor="login-password">Password</label>
+              <div className="input-wrapper">
+                <span className="input-icon">🔒</span>
+                <input
+                  id="login-password"
+                  className="form-input has-toggle"
+                  type={showPass ? 'text' : 'password'}
+                  placeholder="Enter your password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+                <button
+                  type="button"
+                  className="input-toggle"
+                  onClick={() => setShowPass(v => !v)}
+                  aria-label={showPass ? 'Hide password' : 'Show password'}
+                >
+                  {showPass ? '🙈' : '👁️'}
+                </button>
+              </div>
+            </div>
+
+            <button type="submit" className="login-btn" disabled={loading}>
+              {loading && <span className="spinner spinner--sm spinner--white" />}
+              {loading ? 'Signing in…' : 'Sign In'}
+            </button>
+          </form>
+
+          <div className="login-footer">
+            Secure · Encrypted · © {new Date().getFullYear()} NSE Dashboard
           </div>
-
-          <button type="submit" className="login-btn" disabled={loading}>
-            {loading && <span className="spinner spinner--sm spinner--white" />}
-            {loading ? 'Signing in…' : 'Sign In →'}
-          </button>
-        </form>
-
-        <div className="login-footer">
-          Secure login · All rights reserved © {new Date().getFullYear()}
         </div>
 
       </div>
