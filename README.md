@@ -233,9 +233,9 @@ make local-frontend   # React  on http://localhost:3000
 
 ### Option A — Master script (recommended, run once per stage)
 ```bash
-bash infrastructure/scripts/setup_stage.sh dev  65.2.103.124 your@email.com
-bash infrastructure/scripts/setup_stage.sh qc   65.2.103.124 your@email.com
-bash infrastructure/scripts/setup_stage.sh prod 65.2.103.124 your@email.com
+bash infrastructure/scripts/setup_stage.sh dev  YOUR_EC2_PUBLIC_IP your@email.com
+bash infrastructure/scripts/setup_stage.sh qc   YOUR_EC2_PUBLIC_IP your@email.com
+bash infrastructure/scripts/setup_stage.sh prod YOUR_EC2_PUBLIC_IP your@email.com
 ```
 
 This runs all 9 phases: IAM → S3/DynamoDB → SSM secrets → SQS/SNS → Lambda → EventBridge → CloudFront → CloudWatch → CloudTrail.
@@ -273,15 +273,15 @@ bash infrastructure/sns/setup_sns.sh prod your@email.com
 
 | Secret | Value |
 |--------|-------|
-| `EC2_HOST` | `65.2.103.124` |
+| `EC2_HOST` | `YOUR_EC2_PUBLIC_IP` |
 | `EC2_SSH_KEY` | Contents of `~/.ssh/nse-key.pem` |
 | `AWS_ACCESS_KEY_ID` | IAM access key |
 | `AWS_SECRET_ACCESS_KEY` | IAM secret key |
-| `S3_FRONTEND_BUCKET` | `nse-frontend-961341540531` |
-| `DEV_API_URL` | `http://65.2.103.124/api/v1` |
-| `DEV_SSE_URL` | `http://65.2.103.124` |
-| `PROD_API_URL` | `https://y04lj0toia.execute-api.ap-south-1.amazonaws.com/prod/api/v1` |
-| `PROD_SSE_URL` | `http://65.2.103.124` |
+| `S3_FRONTEND_BUCKET` | `nse-frontend-YOUR_AWS_ACCOUNT_ID` |
+| `DEV_API_URL` | `http://YOUR_EC2_PUBLIC_IP/api/v1` |
+| `DEV_SSE_URL` | `http://YOUR_EC2_PUBLIC_IP` |
+| `PROD_API_URL` | `https://YOUR_API_GW_ID.execute-api.ap-south-1.amazonaws.com/prod/api/v1` |
+| `PROD_SSE_URL` | `http://YOUR_EC2_PUBLIC_IP` |
 
 ### Setup approval gate for prod
 
