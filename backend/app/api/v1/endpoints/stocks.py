@@ -27,7 +27,7 @@ Route summary:
     DELETE /watchlist/{id}               — remove from watchlist
 """
 
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 

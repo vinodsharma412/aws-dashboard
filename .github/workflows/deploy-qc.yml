@@ -41,7 +41,7 @@ jobs:
       - name: Install deps + lint
         run: |
           pip install -r backend/requirements.txt ruff -q
-          ruff check backend/app/ --select E,W,F --ignore E501
+          ruff check backend/app/
 
       - name: Set up Node 20
         uses: actions/setup-node@v4

@@ -4,7 +4,7 @@ Note: In the AWS version primary keys are UUID strings (not int).
 Timestamps are ISO-8601 strings from DynamoDB (not datetime objects).
 """
 
-from typing import Any, List, Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, field_validator
 

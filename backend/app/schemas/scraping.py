@@ -5,7 +5,6 @@ Timestamps are ISO-8601 strings from DynamoDB (not datetime objects).
 """
 
 import re
-from datetime import datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, field_validator

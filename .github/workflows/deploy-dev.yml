@@ -50,7 +50,7 @@ jobs:
         run: pip install -r backend/requirements.txt ruff
 
       - name: Lint with ruff
-        run: ruff check backend/app/ --select E,W,F --ignore E501
+        run: ruff check backend/app/
 
       - name: Set up Node 20
         uses: actions/setup-node@v4
