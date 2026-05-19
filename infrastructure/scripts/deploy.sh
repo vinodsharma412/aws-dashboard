@@ -62,7 +62,7 @@ $SSH "
   set -e
   cd $REMOTE_DIR
   # Create venv if it doesn't exist (first deploy)
-  [ -d venv ] || python3.12 -m venv venv
+  [ -d venv ] || python3 -m venv venv
   source venv/bin/activate
   pip install -r backend/requirements.txt -q
 "
