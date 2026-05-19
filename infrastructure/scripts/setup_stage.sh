@@ -196,7 +196,9 @@ EC2_INSTANCE=$(aws ec2 describe-instances \
   --filters "Name=ip-address,Values=${EC2_IP}" \
   --query "Reservations[0].Instances[0].InstanceId" --output text \
   --region "${REGION}" 2>/dev/null || echo "")
-bash "${INFRA}/cloudwatch/setup_alarms.sh" "${STAGE}" "${EC2_INSTANCE:-i-unknown}" "y04lj0toia"
+API_GW_ID=$(aws ssm get-parameter --name "/nse/${STAGE}/api-gw-id" \
+  --query "Parameter.Value" --output text --region "${REGION}" 2>/dev/null || echo "")
+bash "${INFRA}/cloudwatch/setup_alarms.sh" "${STAGE}" "${EC2_INSTANCE:-i-unknown}" "${API_GW_ID:-none}"
 
 # ── Phase 9: CloudTrail (account-wide, run once) ──────────────────────────────
 echo ""
