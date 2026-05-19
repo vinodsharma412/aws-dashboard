@@ -53,10 +53,13 @@ async def lifespan(_app: FastAPI):
             worker.terminate()
 
 
+_root_path = "" if settings.STAGE == "prod" else f"/{settings.STAGE}"
+
 app = FastAPI(
     title=settings.APP_NAME,
     debug=settings.DEBUG,
     lifespan=lifespan,
+    root_path=_root_path,
 )
 
 app.add_middleware(LoggingMiddleware)
