@@ -90,16 +90,18 @@ jobs:
             --exclude='__pycache__' --exclude='*.pyc' \
             --exclude='.env' --exclude='worker.pid' \
             -e "ssh -i ~/.ssh/nse-key.pem" \
-            backend/ ubuntu@${{ secrets.EC2_HOST }}:${{ env.REMOTE_DIR }}/
+            backend/ ubuntu@${{ secrets.EC2_HOST }}:${{ env.REMOTE_DIR }}/backend/
 
       - name: Install deps + restart services
         run: |
           ssh -i ~/.ssh/nse-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'ENDSSH'
-            cd ${{ env.REMOTE_DIR }}
-            source venv/bin/activate 2>/dev/null || (python3 -m venv venv && source venv/bin/activate)
-            pip install -r requirements.txt -q
-            sudo systemctl restart ${{ env.SERVICE_API }} || true
-            sudo systemctl restart ${{ env.SERVICE_WORKER }} || true
+            set -e
+            cd /opt/nse-qc
+            [ -d venv ] || python3 -m venv venv
+            source venv/bin/activate
+            pip install -r backend/requirements.txt -q
+            sudo systemctl restart nse-api-qc
+            sudo systemctl restart nse-worker-qc || true
           ENDSSH
 
       - name: Health check

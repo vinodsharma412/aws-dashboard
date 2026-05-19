@@ -100,19 +100,19 @@ jobs:
             --exclude='__pycache__' --exclude='*.pyc' \
             --exclude='.env' --exclude='worker.pid' \
             -e "ssh -i ~/.ssh/nse-key.pem" \
-            backend/ ubuntu@${{ secrets.EC2_HOST }}:${{ env.REMOTE_DIR }}/
+            backend/ ubuntu@${{ secrets.EC2_HOST }}:${{ env.REMOTE_DIR }}/backend/
 
       - name: Install deps + rolling restart
         run: |
           ssh -i ~/.ssh/nse-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'ENDSSH'
             set -e
-            cd ${{ env.REMOTE_DIR }}
+            cd /opt/nse
+            [ -d venv ] || python3 -m venv venv
             source venv/bin/activate
-            pip install -r requirements.txt -q
-            # Restart worker first (drains queue), then API
-            sudo systemctl restart ${{ env.SERVICE_WORKER }}
+            pip install -r backend/requirements.txt -q
+            sudo systemctl restart nse-worker
             sleep 3
-            sudo systemctl restart ${{ env.SERVICE_API }}
+            sudo systemctl restart nse-api
             echo "Deployment complete. Stage=prod"
           ENDSSH
 
