@@ -90,7 +90,7 @@ jobs:
           SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/nse-key.pem
+          printf '%s' "$SSH_KEY" | sed 's/\\n/\n/g' > ~/.ssh/nse-key.pem
           chmod 600 ~/.ssh/nse-key.pem
           ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
