@@ -1,4 +1,4 @@
-# NSE Stock Dashboard — AWS Solutions Architect Professional
+# Stock Dashboard — AWS Solutions Architect Professional
 
 A production-grade full-stack application demonstrating **AWS Solutions Architect Professional** patterns using **only free-tier AWS services**.
 
