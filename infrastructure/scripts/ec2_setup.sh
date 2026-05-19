@@ -30,7 +30,7 @@ sudo apt-get update -y -qq
 sudo apt-get upgrade -y -qq
 sudo apt-get install -y -qq \
   build-essential curl git unzip \
-  python3.12 python3.12-venv python3-pip \
+  python3 python3-venv python3-pip \
   nginx \
   fonts-liberation libatk-bridge2.0-0 libatk1.0-0 \
   libatspi2.0-0 libcairo2 libcups2 libdbus-1-3 \
@@ -71,7 +71,7 @@ echo "[4/8] Creating Python virtual environments..."
 
 for stage_dir in /opt/nse /opt/nse-dev /opt/nse-qc; do
   if [ ! -d "$stage_dir/venv" ]; then
-    python3.12 -m venv "$stage_dir/venv"
+    python3 -m venv "$stage_dir/venv"
     "$stage_dir/venv/bin/pip" install --upgrade pip wheel -q
     echo "  ✓ venv created: $stage_dir/venv"
   else
