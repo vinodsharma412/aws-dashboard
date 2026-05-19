@@ -1,0 +1,171 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CI/CD — DEV stage
+#
+# Trigger: push to the `develop` branch
+# Target:  STAGE=dev  (DynamoDB tables prefixed with "dev_")
+#
+# What it does:
+#   1. Lints Python with ruff
+#   2. Builds and tests the React frontend
+#   3. Deploys backend to EC2 via rsync over SSH
+#   4. Uploads the frontend build to S3 (dev bucket)
+#   5. Restarts the dev systemd services on EC2
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   EC2_HOST           EC2 public IP or hostname
+#   EC2_SSH_KEY        Private SSH key content (PEM format)
+#   AWS_ACCESS_KEY_ID  IAM key with S3 and SSM permissions
+#   AWS_SECRET_ACCESS_KEY
+#   S3_FRONTEND_BUCKET S3 bucket name for frontend (e.g. nse-frontend-{account})
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+name: Deploy — DEV
+
+on:
+  push:
+    branches: [ develop ]
+  workflow_dispatch:
+
+env:
+  STAGE: dev
+  AWS_REGION: ap-south-1
+  REMOTE_DIR: /opt/nse-dev
+  SERVICE_API: nse-api-dev
+  SERVICE_WORKER: nse-worker-dev
+
+jobs:
+  # ── Job 1: Lint & test ───────────────────────────────────────────────────────
+  lint-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt ruff
+
+      - name: Lint with ruff
+        run: ruff check backend/app/ --select E,W,F --ignore E501
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend (dev)
+        run: npm run build
+        working-directory: frontend
+        env:
+          REACT_APP_STAGE: dev
+          REACT_APP_API_URL: ${{ secrets.DEV_API_URL }}
+          REACT_APP_SSE_URL: ${{ secrets.DEV_SSE_URL }}
+          CI: false
+
+      - name: Upload frontend build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dev-build
+          path: frontend/build/
+          retention-days: 1
+
+  # ── Job 2: Deploy backend to EC2 ────────────────────────────────────────────
+  deploy-backend:
+    name: Deploy Backend (EC2)
+    needs: lint-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/nse-key.pem
+          chmod 600 ~/.ssh/nse-key.pem
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Rsync backend to EC2
+        run: |
+          rsync -az --delete \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='.env' \
+            --exclude='worker.pid' \
+            -e "ssh -i ~/.ssh/nse-key.pem" \
+            backend/ \
+            ubuntu@${{ secrets.EC2_HOST }}:${{ env.REMOTE_DIR }}/
+
+      - name: Install Python deps + restart services
+        run: |
+          ssh -i ~/.ssh/nse-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'ENDSSH'
+            set -e
+            cd ${{ env.REMOTE_DIR }}
+            source venv/bin/activate 2>/dev/null || python3 -m venv venv && source venv/bin/activate
+            pip install -r requirements.txt -q
+            sudo systemctl restart ${{ env.SERVICE_API }} || true
+            sudo systemctl restart ${{ env.SERVICE_WORKER }} || true
+            echo "Services restarted. Stage: ${{ env.STAGE }}"
+          ENDSSH
+
+      - name: Health check
+        run: |
+          sleep 8
+          # Dev API is on port 9001; Nginx proxies /dev/api/ → :9001
+          curl -fsS "http://${{ secrets.EC2_HOST }}/dev/api/v1/health/" || exit 1
+          echo "Health check passed."
+
+  # ── Job 3: Deploy frontend to S3 ────────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy Frontend (S3)
+    needs: lint-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dev-build
+          path: build/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload static assets (long cache)
+        run: |
+          aws s3 sync build/static/ \
+            s3://${{ secrets.S3_FRONTEND_BUCKET }}/static/ \
+            --cache-control "max-age=31536000, immutable" \
+            --delete
+
+      - name: Upload remaining files (short cache)
+        run: |
+          aws s3 sync build/ \
+            s3://${{ secrets.S3_FRONTEND_BUCKET }}/ \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --exclude "static/*" \
+            --delete
+
+      - name: Invalidate CloudFront cache
+        run: |
+          DIST_ID=$(aws ssm get-parameter \
+            --name "/nse/dev/cloudfront-dist-id" \
+            --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          if [ -n "$DIST_ID" ]; then
+            aws cloudfront create-invalidation \
+              --distribution-id "$DIST_ID" \
+              --paths "/*"
+            echo "CloudFront invalidation created for $DIST_ID"
+          fi

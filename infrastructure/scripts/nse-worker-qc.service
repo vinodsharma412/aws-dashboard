@@ -1,0 +1,41 @@
+# systemd service — Playwright scraping worker (QC stage)
+#
+# Install:
+#   sudo cp infrastructure/scripts/nse-worker-qc.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable nse-worker-qc
+#   sudo systemctl start nse-worker-qc
+#
+# Logs:   sudo journalctl -u nse-worker-qc -f
+
+[Unit]
+Description=NSE Stock Dashboard — Playwright Scraping Worker (qc)
+After=network.target nse-api-qc.service
+Wants=network.target
+
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/nse-qc/backend
+Environment=PATH=/opt/nse-qc/venv/bin:/usr/bin:/bin
+Environment=PLAYWRIGHT_BROWSERS_PATH=/home/ubuntu/.cache/ms-playwright
+Environment=STAGE=qc
+EnvironmentFile=-/opt/nse-qc/backend/.env
+
+ExecStart=/opt/nse-qc/venv/bin/python -m app.worker
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+MemoryLimit=500M
+CPUQuota=70%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nse-worker-qc
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,141 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CI/CD — QC (staging) stage
+#
+# Trigger: push to any `release/**` branch, e.g. release/1.2.0
+# Target:  STAGE=qc  (DynamoDB tables prefixed with "qc_")
+#
+# QC environment is identical to production in configuration.
+# Use it to run acceptance tests before merging to main.
+#
+# Required GitHub Secrets:
+#   Same as deploy-dev.yml plus:
+#   QC_API_URL, QC_SSE_URL  (if different from dev)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+name: Deploy — QC
+
+on:
+  push:
+    branches: [ "release/**" ]
+  workflow_dispatch:
+
+env:
+  STAGE: qc
+  AWS_REGION: ap-south-1
+  REMOTE_DIR: /opt/nse-qc
+  SERVICE_API: nse-api-qc
+  SERVICE_WORKER: nse-worker-qc
+
+jobs:
+  lint-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps + lint
+        run: |
+          pip install -r backend/requirements.txt ruff -q
+          ruff check backend/app/ --select E,W,F --ignore E501
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend (qc)
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+        env:
+          REACT_APP_STAGE: qc
+          REACT_APP_API_URL: ${{ secrets.QC_API_URL }}
+          REACT_APP_SSE_URL: ${{ secrets.QC_SSE_URL }}
+          CI: false
+
+      - name: Upload frontend build
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-qc-build
+          path: frontend/build/
+          retention-days: 1
+
+  deploy-backend:
+    name: Deploy Backend (EC2)
+    needs: lint-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/nse-key.pem
+          chmod 600 ~/.ssh/nse-key.pem
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy backend
+        run: |
+          rsync -az --delete \
+            --exclude='__pycache__' --exclude='*.pyc' \
+            --exclude='.env' --exclude='worker.pid' \
+            -e "ssh -i ~/.ssh/nse-key.pem" \
+            backend/ ubuntu@${{ secrets.EC2_HOST }}:${{ env.REMOTE_DIR }}/
+
+      - name: Install deps + restart services
+        run: |
+          ssh -i ~/.ssh/nse-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'ENDSSH'
+            cd ${{ env.REMOTE_DIR }}
+            source venv/bin/activate 2>/dev/null || (python3 -m venv venv && source venv/bin/activate)
+            pip install -r requirements.txt -q
+            sudo systemctl restart ${{ env.SERVICE_API }} || true
+            sudo systemctl restart ${{ env.SERVICE_WORKER }} || true
+          ENDSSH
+
+      - name: Health check
+        run: |
+          sleep 8
+          # QC API is on port 9002; Nginx proxies /qc/api/ → :9002
+          curl -fsS "http://${{ secrets.EC2_HOST }}/qc/api/v1/health/" || exit 1
+
+  deploy-frontend:
+    name: Deploy Frontend (S3)
+    needs: lint-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-qc-build
+          path: build/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload to S3
+        run: |
+          aws s3 sync build/static/ s3://${{ secrets.S3_FRONTEND_BUCKET }}/static/ \
+            --cache-control "max-age=31536000, immutable" --delete
+          aws s3 sync build/ s3://${{ secrets.S3_FRONTEND_BUCKET }}/ \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --exclude "static/*" --delete
+
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws ssm get-parameter \
+            --name "/nse/qc/cloudfront-dist-id" \
+            --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          [ -n "$DIST_ID" ] && aws cloudfront create-invalidation \
+            --distribution-id "$DIST_ID" --paths "/*" || true

@@ -1,0 +1,8 @@
+# Ignore all pip-installed packages bundled here for Lambda deployment.
+# The deploy.sh script installs them fresh each time.
+# Only handler.py and deploy.sh belong in version control.
+
+*
+!.gitignore
+!handler.py
+!deploy.sh

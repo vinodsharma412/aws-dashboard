@@ -1,0 +1,48 @@
+# systemd service — FastAPI uvicorn server (PRODUCTION)
+#
+# Install:
+#   sudo cp infrastructure/scripts/nse-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable nse-api
+#   sudo systemctl start nse-api
+#
+# Logs:   sudo journalctl -u nse-api -f
+# Reload: sudo systemctl restart nse-api
+
+[Unit]
+Description=NSE Stock Dashboard — FastAPI (prod)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/nse/backend
+Environment=PATH=/opt/nse/venv/bin:/usr/bin:/bin
+Environment=STAGE=prod
+EnvironmentFile=-/opt/nse/backend/.env
+
+ExecStart=/opt/nse/venv/bin/uvicorn \
+    app.main:app \
+    --host 127.0.0.1 \
+    --port 9000 \
+    --workers 1 \
+    --log-level info \
+    --no-access-log
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Resource limits for t2.micro (1 GB RAM)
+MemoryLimit=700M
+CPUQuota=90%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nse-api
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+# systemd service — Playwright scraping worker (PRODUCTION)
+#
+# Install:
+#   sudo cp infrastructure/scripts/nse-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable nse-worker
+#   sudo systemctl start nse-worker
+#
+# Logs:   sudo journalctl -u nse-worker -f
+# Reload: sudo systemctl restart nse-worker
+
+[Unit]
+Description=NSE Stock Dashboard — Playwright Scraping Worker (prod)
+After=network.target nse-api.service
+Wants=network.target
+
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/nse/backend
+Environment=PATH=/opt/nse/venv/bin:/usr/bin:/bin
+Environment=PLAYWRIGHT_BROWSERS_PATH=/home/ubuntu/.cache/ms-playwright
+Environment=STAGE=prod
+EnvironmentFile=-/opt/nse/backend/.env
+
+ExecStart=/opt/nse/venv/bin/python -m app.worker
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+MemoryLimit=500M
+CPUQuota=70%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nse-worker
+
+[Install]
+WantedBy=multi-user.target

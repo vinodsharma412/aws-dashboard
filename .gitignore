@@ -1,0 +1,64 @@
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Environment / secrets ──────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example         # keep example templates
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+# Keep these safe template/local-only files
+!frontend/.env.example
+!frontend/.env.development
+!frontend/.env.dev.example
+!frontend/.env.qc.example
+*.pem
+*.key
+*.p12
+.ec2-host             # stores real EC2 IP — local only
+
+# ── Claude Code local directory (contains IPs, passwords in command history) ────
+.claude/
+
+# ── Node / React ───────────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/build/
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+
+# ── AWS / Terraform ────────────────────────────────────────────────────────────
+.aws/
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# ── IDE ────────────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+
+# ── OS ─────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Lambda: zip artefacts (pip packages are excluded via local .gitignore) ─────
+infrastructure/lambda/**/*.zip
+
+# ── CloudWatch dashboard temp file ────────────────────────────────────────────
+/tmp/nse-dashboard.json
