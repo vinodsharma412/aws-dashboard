@@ -109,21 +109,33 @@ Audit:
 
 ## Three-Stage Deployment
 
-Same codebase, three isolated environments in the **same AWS account**.
+Same codebase, three isolated environments on the **same EC2 instance**.
 
-| Stage | Git branch | DynamoDB tables | SSM path | Deploy |
-|-------|-----------|-----------------|----------|--------|
-| `dev` | `develop` | `dev_users`, `dev_menus`… | `/nse/dev/` | Auto on push |
-| `qc` | `release/**` | `qc_users`, `qc_menus`… | `/nse/qc/` | Auto on push |
-| `prod` | `main` | `users`, `menus`… | `/nse/prod/` | Manual approval |
+| Stage | Port | Directory | DynamoDB prefix | SSM path |
+|-------|------|-----------|-----------------|----------|
+| `dev` | 9001 | `/opt/nse-dev` | `dev_` | `/nse/dev/` |
+| `qc`  | 9002 | `/opt/nse-qc`  | `qc_`  | `/nse/qc/`  |
+| `prod`| 9000 | `/opt/nse`     | _(none)_| `/nse/prod/`|
 
-### Git workflow
+### CI/CD pipeline (triggered by `git push origin develop`)
+
 ```
-feature/xyz ─┐
-             ├──→  develop  ──→  release/1.2.0  ──→  main
-             │        ↓               ↓               ↓
-             │       DEV             QC             PROD
-             │   (auto-deploy)   (auto-deploy)  (+approval gate)
+push to develop
+      │
+      ▼
+ Lint & Test ──FAIL──► stop
+      │
+      ▼
+ Deploy DEV ──FAIL──► stop
+      │  health check ✓
+      ▼
+ Deploy QC ──FAIL──► stop
+      │  health check ✓
+      ▼
+ ⏳ Waiting for approval  (email sent to reviewer)
+      │  Approve in GitHub UI
+      ▼
+ Deploy PROD
 ```
 
 ### How stage isolation works
@@ -269,35 +281,33 @@ bash infrastructure/sns/setup_sns.sh prod your@email.com
 
 ### Setup GitHub Secrets
 
-**Settings → Secrets and variables → Actions:**
+**Settings → Secrets and variables → Actions → New repository secret:**
 
 | Secret | Value |
 |--------|-------|
-| `EC2_HOST` | `YOUR_EC2_PUBLIC_IP` |
-| `EC2_SSH_KEY` | Contents of `~/.ssh/nse-key.pem` |
+| `EC2_HOST` | EC2 public IP |
+| `EC2_SSH_KEY` | Full contents of your `.pem` key file |
 | `AWS_ACCESS_KEY_ID` | IAM access key |
 | `AWS_SECRET_ACCESS_KEY` | IAM secret key |
 | `S3_FRONTEND_BUCKET` | `nse-frontend-YOUR_AWS_ACCOUNT_ID` |
-| `DEV_API_URL` | `http://YOUR_EC2_PUBLIC_IP/api/v1` |
+| `DEV_API_URL` | `http://YOUR_EC2_PUBLIC_IP/dev/api/v1` |
 | `DEV_SSE_URL` | `http://YOUR_EC2_PUBLIC_IP` |
-| `PROD_API_URL` | `https://YOUR_API_GW_ID.execute-api.ap-south-1.amazonaws.com/prod/api/v1` |
-| `PROD_SSE_URL` | `http://YOUR_EC2_PUBLIC_IP` |
+| `QC_API_URL` | `http://YOUR_EC2_PUBLIC_IP/qc/api/v1` |
+| `QC_SSE_URL` | `http://YOUR_EC2_PUBLIC_IP` |
 
 ### Setup approval gate for prod
 
-**Settings → Environments → New environment → "prod" → Required reviewers: (add yourself)**
+1. **Settings → Environments** → create `dev`, `qc`, `prod`
+2. On `prod` only → **Required reviewers** → add your GitHub username → Save
 
 ### Deploy by pushing
 
 ```bash
-# Deploy to DEV automatically
-git checkout develop && git push origin develop
-
-# Deploy to QC automatically
-git checkout -b release/1.2.0 && git push origin release/1.2.0
-
-# Deploy to PROD (waits for your approval in GitHub)
-git checkout main && git merge release/1.2.0 && git push origin main
+# All stages deploy from one branch
+git add .
+git commit -m "feat: your change"
+git push origin develop
+# Pipeline: Lint → DEV → QC → (approval) → PROD
 ```
 
 ---
