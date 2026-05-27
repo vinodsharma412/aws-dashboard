@@ -109,13 +109,15 @@ Audit:
 
 ## Three-Stage Deployment
 
-Same codebase, three isolated environments on the **same EC2 instance**.
+Same codebase, **three separate AWS accounts** — one per stage. Each account has its own EC2, DynamoDB, S3, and SQS. There are no table-name prefixes; isolation is enforced at the AWS account boundary.
 
-| Stage | Port | Directory | DynamoDB prefix | SSM path |
-|-------|------|-----------|-----------------|----------|
-| `dev` | 9001 | `/opt/nse-dev` | `dev_` | `/nse/dev/` |
-| `qc`  | 9002 | `/opt/nse-qc`  | `qc_`  | `/nse/qc/`  |
-| `prod`| 9000 | `/opt/nse`     | _(none)_| `/nse/prod/`|
+| Stage | AWS account | EC2 directory | DynamoDB tables | SSM path |
+|-------|-------------|---------------|-----------------|----------|
+| `dev` | nse-dev account | `/opt/nse` | `users`, `stock_transactions`… | `/nse/` |
+| `qc`  | nse-qc account  | `/opt/nse` | `users`, `stock_transactions`… | `/nse/` |
+| `prod`| nse-prod account| `/opt/nse` | `users`, `stock_transactions`… | `/nse/` |
+
+All three EC2 instances use identical directory layout, Nginx config, and systemd services. The only difference is the `STAGE` value in `/opt/nse/.env` on each server.
 
 ### CI/CD pipeline (triggered by `git push origin develop`)
 
@@ -123,37 +125,35 @@ Same codebase, three isolated environments on the **same EC2 instance**.
 push to develop
       │
       ▼
- Lint & Test ──FAIL──► stop
+ Lint & Test  ── builds all 3 stage frontends ──FAIL──► stop
       │
       ▼
- Deploy DEV ──FAIL──► stop
-      │  health check ✓
+ Deploy DEV   ── rsync → pip → restart → health check ──FAIL──► stop
+      │         uploads frontend to DEV S3 (dev AWS account)
       ▼
- Deploy QC ──FAIL──► stop
-      │  health check ✓
+ Deploy QC    ── same process on QC EC2 (qc AWS account) ──FAIL──► stop
+      │         uploads frontend to QC S3
       ▼
  ⏳ Waiting for approval  (email sent to reviewer)
-      │  Approve in GitHub UI
+      │  Approve in GitHub UI: Actions → Review deployments → prod
       ▼
- Deploy PROD
+ Deploy PROD  ── same process on PROD EC2 (prod AWS account)
+               uploads frontend to PROD S3 → CloudFront invalidation
 ```
 
 ### How stage isolation works
 
-The `STAGE` environment variable controls everything:
+Each EC2's `/opt/nse/.env` sets `STAGE`, which controls which DynamoDB tables and SSM secrets the app reads. Since each stage is in its own AWS account, dev code cannot reach prod DynamoDB even if it tries — the credentials don't exist for that account.
 
 ```python
-# app/config.py
+# app/config.py — no prefix needed, accounts are isolated
 @property
 def table_prefix(self) -> str:
-    return "" if self.STAGE == "prod" else f"{self.STAGE}_"
+    return ""   # all stages use the same table names in their own account
 
 # app/db/dynamo.py
-dynamo_users = _table("users")   # → "users" in prod, "dev_users" in dev
+dynamo_users = _table("users")  # → "users" in every account
 ```
-
-All SQS queues, SSM parameters, Lambda functions, and CloudWatch alarms also
-include the stage name, so environments never interfere.
 
 ---
 
@@ -283,17 +283,44 @@ bash infrastructure/sns/setup_sns.sh prod your@email.com
 
 **Settings → Secrets and variables → Actions → New repository secret:**
 
+**Shared (one SSH key works across all accounts if you use the same key pair):**
+
 | Secret | Value |
 |--------|-------|
-| `EC2_HOST` | EC2 public IP |
 | `EC2_SSH_KEY` | Full contents of your `.pem` key file |
-| `AWS_ACCESS_KEY_ID` | IAM access key |
-| `AWS_SECRET_ACCESS_KEY` | IAM secret key |
-| `S3_FRONTEND_BUCKET` | `nse-frontend-YOUR_AWS_ACCOUNT_ID` |
-| `DEV_API_URL` | `http://YOUR_EC2_PUBLIC_IP/dev/api/v1` |
-| `DEV_SSE_URL` | `http://YOUR_EC2_PUBLIC_IP` |
-| `QC_API_URL` | `http://YOUR_EC2_PUBLIC_IP/qc/api/v1` |
-| `QC_SSE_URL` | `http://YOUR_EC2_PUBLIC_IP` |
+
+**DEV account:**
+
+| Secret | Value |
+|--------|-------|
+| `DEV_EC2_HOST` | DEV EC2 public IP |
+| `DEV_AWS_ACCESS_KEY_ID` | IAM access key for the dev account |
+| `DEV_AWS_SECRET_ACCESS_KEY` | IAM secret key for the dev account |
+| `DEV_S3_FRONTEND_BUCKET` | `nse-frontend-<dev-account-id>` |
+| `DEV_API_URL` | `http://<DEV_EC2_HOST>/api/v1` |
+| `DEV_SSE_URL` | `http://<DEV_EC2_HOST>` |
+
+**QC account:**
+
+| Secret | Value |
+|--------|-------|
+| `QC_EC2_HOST` | QC EC2 public IP |
+| `QC_AWS_ACCESS_KEY_ID` | IAM access key for the qc account |
+| `QC_AWS_SECRET_ACCESS_KEY` | IAM secret key for the qc account |
+| `QC_S3_FRONTEND_BUCKET` | `nse-frontend-<qc-account-id>` |
+| `QC_API_URL` | `http://<QC_EC2_HOST>/api/v1` |
+| `QC_SSE_URL` | `http://<QC_EC2_HOST>` |
+
+**PROD account:**
+
+| Secret | Value |
+|--------|-------|
+| `EC2_HOST` | PROD EC2 public IP |
+| `AWS_ACCESS_KEY_ID` | IAM access key for the prod account |
+| `AWS_SECRET_ACCESS_KEY` | IAM secret key for the prod account |
+| `S3_FRONTEND_BUCKET` | `nse-frontend-<prod-account-id>` |
+| `PROD_API_URL` | `http://<EC2_HOST>/api/v1` |
+| `PROD_SSE_URL` | `http://<EC2_HOST>` |
 
 ### Setup approval gate for prod
 

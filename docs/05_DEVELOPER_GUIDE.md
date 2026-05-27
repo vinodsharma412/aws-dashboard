@@ -770,21 +770,22 @@ cd frontend && npm run build     # checks for JS/TypeScript errors
 
 ## 13. Environments — dev / qc / prod
 
-Three stages share one EC2 instance. Each has its own systemd service, directory, and DynamoDB tables.
+Three stages, **three separate AWS accounts**. Each account has its own EC2, DynamoDB, SQS, S3, and SSM. The EC2 setup is identical in every account — only the `STAGE` value in `/opt/nse/.env` differs.
 
 | | DEV | QC | PROD |
 |-|-----|----|------|
 | **Purpose** | Daily development | Pre-release testing | Live users |
 | **Deploy trigger** | Auto — every `develop` push | Auto — after DEV passes | Manual approval required |
-| **EC2 directory** | `/opt/nse-dev` | `/opt/nse-qc` | `/opt/nse` |
-| **FastAPI port** | 9001 | 9002 | 9000 |
-| **API base URL** | `/dev/api/v1` | `/qc/api/v1` | `/api/v1` |
-| **Swagger UI** | `/dev/docs` | `/qc/docs` | `/docs` |
-| **systemd services** | `nse-api-dev`, `nse-worker-dev` | `nse-api-qc`, `nse-worker-qc` | `nse-api`, `nse-worker` |
-| **DynamoDB prefix** | `dev_` | `qc_` | _(none)_ |
-| **SQS queue** | `nse-scraping-jobs-dev` | `nse-scraping-jobs-qc` | `nse-scraping-jobs` |
-| **SSM path** | `/nse/dev/` | `/nse/qc/` | `/nse/prod/` |
-| **Frontend S3 path** | `/dev/` | `/qc/` | `/` |
+| **AWS account** | nse-dev | nse-qc | nse-prod |
+| **EC2 directory** | `/opt/nse` | `/opt/nse` | `/opt/nse` |
+| **FastAPI port** | 9000 | 9000 | 9000 |
+| **API base URL** | `http://<DEV_EC2_HOST>/api/v1` | `http://<QC_EC2_HOST>/api/v1` | `http://<EC2_HOST>/api/v1` |
+| **Swagger UI** | `http://<DEV_EC2_HOST>/docs` | `http://<QC_EC2_HOST>/docs` | `http://<EC2_HOST>/docs` |
+| **systemd services** | `nse-api`, `nse-worker` | `nse-api`, `nse-worker` | `nse-api`, `nse-worker` |
+| **DynamoDB tables** | `users`, `stock_transactions`… | `users`, `stock_transactions`… | `users`, `stock_transactions`… |
+| **SQS queue** | `nse-scraping-jobs` | `nse-scraping-jobs` | `nse-scraping-jobs` |
+| **SSM path** | `/nse/` | `/nse/` | `/nse/` |
+| **Frontend S3** | `DEV_S3_FRONTEND_BUCKET` root | `QC_S3_FRONTEND_BUCKET` root | `S3_FRONTEND_BUCKET` root |
 
 ### GitHub Secrets required
 
@@ -792,15 +793,25 @@ Set these in: **GitHub repo → Settings → Secrets and variables → Actions**
 
 | Secret | Value |
 |--------|-------|
-| `EC2_HOST` | EC2 public IP (Elastic IP) |
-| `EC2_SSH_KEY` | Full contents of `~/.ssh/nse-key.pem` |
-| `AWS_ACCESS_KEY_ID` | IAM user access key |
-| `AWS_SECRET_ACCESS_KEY` | IAM user secret key |
-| `S3_FRONTEND_BUCKET` | `nse-frontend-<your-aws-account-id>` |
-| `DEV_API_URL` | `http://<EC2_IP>/dev/api/v1` |
-| `DEV_SSE_URL` | `http://<EC2_IP>` |
-| `QC_API_URL` | `http://<EC2_IP>/qc/api/v1` |
-| `QC_SSE_URL` | `http://<EC2_IP>` |
+| `EC2_SSH_KEY` | Full contents of your `.pem` key file (shared across accounts) |
+| `DEV_EC2_HOST` | DEV EC2 public IP |
+| `DEV_AWS_ACCESS_KEY_ID` | IAM key for dev account |
+| `DEV_AWS_SECRET_ACCESS_KEY` | IAM secret for dev account |
+| `DEV_S3_FRONTEND_BUCKET` | `nse-frontend-<dev-account-id>` |
+| `DEV_API_URL` | `http://<DEV_EC2_HOST>/api/v1` |
+| `DEV_SSE_URL` | `http://<DEV_EC2_HOST>` |
+| `QC_EC2_HOST` | QC EC2 public IP |
+| `QC_AWS_ACCESS_KEY_ID` | IAM key for qc account |
+| `QC_AWS_SECRET_ACCESS_KEY` | IAM secret for qc account |
+| `QC_S3_FRONTEND_BUCKET` | `nse-frontend-<qc-account-id>` |
+| `QC_API_URL` | `http://<QC_EC2_HOST>/api/v1` |
+| `QC_SSE_URL` | `http://<QC_EC2_HOST>` |
+| `EC2_HOST` | PROD EC2 public IP |
+| `AWS_ACCESS_KEY_ID` | IAM key for prod account |
+| `AWS_SECRET_ACCESS_KEY` | IAM secret for prod account |
+| `S3_FRONTEND_BUCKET` | `nse-frontend-<prod-account-id>` |
+| `PROD_API_URL` | `http://<EC2_HOST>/api/v1` |
+| `PROD_SSE_URL` | `http://<EC2_HOST>` |
 
 ### GitHub Environments required
 

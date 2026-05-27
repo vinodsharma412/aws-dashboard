@@ -132,19 +132,15 @@ class Settings(BaseSettings):
 
     @property
     def table_prefix(self) -> str:
-        """DynamoDB table name prefix for the current stage.
+        """DynamoDB table name prefix.
 
-        ``prod`` uses tables as-is (backward-compatible).
-        Lower environments prefix all table names so they never touch
-        production data even when pointing at the same AWS account.
-
-        Examples::
-
-            prod → ""       →  table name: "users"
-            qc   → "qc_"   →  table name: "qc_users"
-            dev  → "dev_"  →  table name: "dev_users"
+        Each stage (dev / qc / prod) runs in its own AWS account, so all
+        three use the same table names (``users``, ``stock_transactions``,
+        etc.) without any prefix.  Isolation is enforced at the account
+        level — a dev process literally cannot reach prod DynamoDB because
+        it has no credentials for that account.
         """
-        return "" if self.STAGE == "prod" else f"{self.STAGE}_"
+        return ""
 
     @property
     def is_production(self) -> bool:
