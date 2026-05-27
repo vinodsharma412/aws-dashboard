@@ -13,7 +13,7 @@
 # Reload: sudo systemctl restart nse-worker
 
 [Unit]
-Description=NSE Stock Dashboard — Playwright Scraping Worker
+Description=NSE Stock Dashboard — Playwright Worker (prod)
 After=network.target nse-api.service
 Wants=network.target
 

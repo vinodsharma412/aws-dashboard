@@ -107,17 +107,14 @@ Audit:
 
 ---
 
-## Three-Stage Deployment
+## Two-Stage Deployment
 
-Same codebase, **three separate AWS accounts** — one per stage. Each account has its own EC2, DynamoDB, S3, and SQS. There are no table-name prefixes; isolation is enforced at the AWS account boundary.
+Same codebase, two stages on **one EC2 instance** in **one AWS account**. Developers work locally; staging is the shared cloud test environment before production.
 
-| Stage | AWS account | EC2 directory | DynamoDB tables | SSM path |
-|-------|-------------|---------------|-----------------|----------|
-| `dev` | nse-dev account | `/opt/nse` | `users`, `stock_transactions`… | `/nse/` |
-| `qc`  | nse-qc account  | `/opt/nse` | `users`, `stock_transactions`… | `/nse/` |
-| `prod`| nse-prod account| `/opt/nse` | `users`, `stock_transactions`… | `/nse/` |
-
-All three EC2 instances use identical directory layout, Nginx config, and systemd services. The only difference is the `STAGE` value in `/opt/nse/.env` on each server.
+| Stage | Directory | Port | DynamoDB prefix | SSM path | SQS queue |
+|-------|-----------|------|-----------------|----------|-----------|
+| `staging` | `/opt/nse-staging` | 9001 | `stg_` | `/nse/staging/` | `nse-scraping-jobs-staging` |
+| `prod`    | `/opt/nse`         | 9000 | _(none)_ | `/nse/prod/`   | `nse-scraping-jobs` |
 
 ### CI/CD pipeline (triggered by `git push origin develop`)
 
@@ -125,34 +122,33 @@ All three EC2 instances use identical directory layout, Nginx config, and system
 push to develop
       │
       ▼
- Lint & Test  ── builds all 3 stage frontends ──FAIL──► stop
+ Lint & Test ── ruff + build staging & prod frontends ──FAIL──► stop
       │
       ▼
- Deploy DEV   ── rsync → pip → restart → health check ──FAIL──► stop
-      │         uploads frontend to DEV S3 (dev AWS account)
-      ▼
- Deploy QC    ── same process on QC EC2 (qc AWS account) ──FAIL──► stop
-      │         uploads frontend to QC S3
+ Deploy STAGING ── rsync → pip → restart → health check ──FAIL──► stop
+      │            frontend → S3 /staging/
       ▼
  ⏳ Waiting for approval  (email sent to reviewer)
-      │  Approve in GitHub UI: Actions → Review deployments → prod
+      │  Approve: GitHub → Actions → Review deployments → prod
       ▼
- Deploy PROD  ── same process on PROD EC2 (prod AWS account)
-               uploads frontend to PROD S3 → CloudFront invalidation
+ Deploy PROD ── same process → /opt/nse/ → port 9000
+               frontend → S3 root → CloudFront invalidation
 ```
 
 ### How stage isolation works
 
-Each EC2's `/opt/nse/.env` sets `STAGE`, which controls which DynamoDB tables and SSM secrets the app reads. Since each stage is in its own AWS account, dev code cannot reach prod DynamoDB even if it tries — the credentials don't exist for that account.
+The `STAGE` environment variable controls DynamoDB table names, SQS queue, SNS topic, and SSM paths. Staging tables are prefixed `stg_` so they can never overlap with production data.
 
 ```python
-# app/config.py — no prefix needed, accounts are isolated
+# app/config.py
 @property
 def table_prefix(self) -> str:
-    return ""   # all stages use the same table names in their own account
+    return "" if self.STAGE == "prod" else "stg_"
 
 # app/db/dynamo.py
-dynamo_users = _table("users")  # → "users" in every account
+dynamo_users = _table("users")
+# → "users"     in prod
+# → "stg_users" in staging
 ```
 
 ---
@@ -283,58 +279,32 @@ bash infrastructure/sns/setup_sns.sh prod your@email.com
 
 **Settings → Secrets and variables → Actions → New repository secret:**
 
-**Shared (one SSH key works across all accounts if you use the same key pair):**
-
 | Secret | Value |
 |--------|-------|
+| `EC2_HOST` | EC2 public IP (Elastic IP) |
 | `EC2_SSH_KEY` | Full contents of your `.pem` key file |
-
-**DEV account:**
-
-| Secret | Value |
-|--------|-------|
-| `DEV_EC2_HOST` | DEV EC2 public IP |
-| `DEV_AWS_ACCESS_KEY_ID` | IAM access key for the dev account |
-| `DEV_AWS_SECRET_ACCESS_KEY` | IAM secret key for the dev account |
-| `DEV_S3_FRONTEND_BUCKET` | `nse-frontend-<dev-account-id>` |
-| `DEV_API_URL` | `http://<DEV_EC2_HOST>/api/v1` |
-| `DEV_SSE_URL` | `http://<DEV_EC2_HOST>` |
-
-**QC account:**
-
-| Secret | Value |
-|--------|-------|
-| `QC_EC2_HOST` | QC EC2 public IP |
-| `QC_AWS_ACCESS_KEY_ID` | IAM access key for the qc account |
-| `QC_AWS_SECRET_ACCESS_KEY` | IAM secret key for the qc account |
-| `QC_S3_FRONTEND_BUCKET` | `nse-frontend-<qc-account-id>` |
-| `QC_API_URL` | `http://<QC_EC2_HOST>/api/v1` |
-| `QC_SSE_URL` | `http://<QC_EC2_HOST>` |
-
-**PROD account:**
-
-| Secret | Value |
-|--------|-------|
-| `EC2_HOST` | PROD EC2 public IP |
-| `AWS_ACCESS_KEY_ID` | IAM access key for the prod account |
-| `AWS_SECRET_ACCESS_KEY` | IAM secret key for the prod account |
-| `S3_FRONTEND_BUCKET` | `nse-frontend-<prod-account-id>` |
+| `AWS_ACCESS_KEY_ID` | IAM access key |
+| `AWS_SECRET_ACCESS_KEY` | IAM secret key |
+| `S3_FRONTEND_BUCKET` | `nse-frontend-<your-account-id>` |
+| `STAGING_API_URL` | `http://<EC2_HOST>/staging/api/v1` |
+| `STAGING_SSE_URL` | `http://<EC2_HOST>` |
 | `PROD_API_URL` | `http://<EC2_HOST>/api/v1` |
 | `PROD_SSE_URL` | `http://<EC2_HOST>` |
 
-### Setup approval gate for prod
+**9 secrets total** — same single account, same EC2.
 
-1. **Settings → Environments** → create `dev`, `qc`, `prod`
-2. On `prod` only → **Required reviewers** → add your GitHub username → Save
+### Setup GitHub Environments
+
+1. **Settings → Environments** → create `staging` (no protection) and `prod`
+2. On `prod` → **Required reviewers** → add your GitHub username → Save
 
 ### Deploy by pushing
 
 ```bash
-# All stages deploy from one branch
 git add .
 git commit -m "feat: your change"
 git push origin develop
-# Pipeline: Lint → DEV → QC → (approval) → PROD
+# Pipeline: Lint → STAGING (auto) → (approval) → PROD
 ```
 
 ---

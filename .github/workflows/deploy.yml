@@ -1,45 +1,31 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Promotion pipeline:  DEV → QC → PROD
+# Two-stage promotion pipeline:  STAGING → PROD
 #
 # Trigger:  push to `develop`
 #
-# Architecture: each stage runs in its own AWS account on its own EC2.
-# No table-name prefixes are needed — account-level isolation guarantees
-# that dev code cannot reach prod DynamoDB regardless of table names.
+# Both stages run on ONE EC2 instance in ONE AWS account.
+# Isolation is enforced by DynamoDB table prefix (stg_) and separate
+# SQS queues, SNS topics, and SSM paths per stage.
 #
 # Flow:
-#   1. Lint & Test  — ruff + build all 3 stage frontends (catch errors early)
-#   2. Deploy DEV   — EC2 + S3 in dev account     (auto)
-#   3. Deploy QC    — EC2 + S3 in qc account      (auto, only if DEV passes)
-#   4. Deploy PROD  — EC2 + S3 in prod account    (requires manual approval)
+#   1. Lint & Test  — ruff + build both stage frontends
+#   2. Deploy STAGING — auto, every push
+#   3. Deploy PROD    — requires manual approval in GitHub UI
 #
-# Required GitHub Secrets (Settings → Secrets → Actions):
-#   DEV_EC2_HOST              IP of dev EC2
-#   DEV_AWS_ACCESS_KEY_ID     IAM key for dev account
-#   DEV_AWS_SECRET_ACCESS_KEY IAM secret for dev account
-#   DEV_S3_FRONTEND_BUCKET    nse-frontend-<dev-account-id>
-#   DEV_API_URL               http://<DEV_EC2_HOST>/api/v1
-#   DEV_SSE_URL               http://<DEV_EC2_HOST>
+# GitHub Secrets required (Settings → Secrets → Actions):
+#   EC2_HOST              EC2 public IP (Elastic IP)
+#   EC2_SSH_KEY           Full contents of .pem key file
+#   AWS_ACCESS_KEY_ID     IAM access key
+#   AWS_SECRET_ACCESS_KEY IAM secret key
+#   S3_FRONTEND_BUCKET    nse-frontend-<account-id>
+#   STAGING_API_URL       http://<EC2_HOST>/staging/api/v1
+#   STAGING_SSE_URL       http://<EC2_HOST>
+#   PROD_API_URL          http://<EC2_HOST>/api/v1
+#   PROD_SSE_URL          http://<EC2_HOST>
 #
-#   QC_EC2_HOST               IP of qc EC2
-#   QC_AWS_ACCESS_KEY_ID      IAM key for qc account
-#   QC_AWS_SECRET_ACCESS_KEY  IAM secret for qc account
-#   QC_S3_FRONTEND_BUCKET     nse-frontend-<qc-account-id>
-#   QC_API_URL                http://<QC_EC2_HOST>/api/v1
-#   QC_SSE_URL                http://<QC_EC2_HOST>
-#
-#   EC2_HOST                  IP of prod EC2
-#   EC2_SSH_KEY               PEM key (same key pair used in all accounts)
-#   AWS_ACCESS_KEY_ID         IAM key for prod account
-#   AWS_SECRET_ACCESS_KEY     IAM secret for prod account
-#   S3_FRONTEND_BUCKET        nse-frontend-<prod-account-id>
-#   PROD_API_URL              http://<EC2_HOST>/api/v1
-#   PROD_SSE_URL              http://<EC2_HOST>
-#
-# Required GitHub Environments (Settings → Environments):
-#   dev   — no protection
-#   qc    — no protection
-#   prod  — Required reviewers: add your GitHub username
+# GitHub Environments required (Settings → Environments):
+#   staging  — no protection rules
+#   prod     — Required reviewers: add your GitHub username
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 name: Deploy Pipeline
@@ -51,11 +37,10 @@ on:
 
 env:
   AWS_REGION: ap-south-1
-  REMOTE_DIR: /opt/nse   # same path on every EC2 — no stage suffix needed
 
 jobs:
 
-  # ── 1. Lint & Test + build all three stage frontends ─────────────────────────
+  # ── 1. Lint & Test + build both frontends ─────────────────────────────────
   lint-test:
     name: Lint & Test
     runs-on: ubuntu-latest
@@ -77,39 +62,23 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: npm install (shared across all builds)
+      - name: npm install
         run: npm ci
         working-directory: frontend
 
-      - name: Build frontend — DEV
+      - name: Build frontend — STAGING
         run: npm run build
         working-directory: frontend
         env:
-          REACT_APP_STAGE: dev
-          REACT_APP_API_URL: ${{ secrets.DEV_API_URL }}
-          REACT_APP_SSE_URL: ${{ secrets.DEV_SSE_URL }}
-          PUBLIC_URL: /
+          REACT_APP_STAGE: staging
+          REACT_APP_API_URL: ${{ secrets.STAGING_API_URL }}
+          REACT_APP_SSE_URL: ${{ secrets.STAGING_SSE_URL }}
+          PUBLIC_URL: /staging
           CI: false
 
       - uses: actions/upload-artifact@v4
         with:
-          name: frontend-dev
-          path: frontend/build/
-          retention-days: 1
-
-      - name: Build frontend — QC
-        run: npm run build
-        working-directory: frontend
-        env:
-          REACT_APP_STAGE: qc
-          REACT_APP_API_URL: ${{ secrets.QC_API_URL }}
-          REACT_APP_SSE_URL: ${{ secrets.QC_SSE_URL }}
-          PUBLIC_URL: /
-          CI: false
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frontend-qc
+          name: frontend-staging
           path: frontend/build/
           retention-days: 1
 
@@ -129,144 +98,12 @@ jobs:
           path: frontend/build/
           retention-days: 1
 
-  # ── 2. Deploy DEV (dev AWS account) ──────────────────────────────────────────
-  deploy-dev:
-    name: Deploy DEV
+  # ── 2. Deploy STAGING (auto on every push) ────────────────────────────────
+  deploy-staging:
+    name: Deploy STAGING
     needs: lint-test
     runs-on: ubuntu-latest
-    environment: dev
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up SSH
-        env:
-          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s' "$SSH_KEY" | sed 's/\\n/\n/g' > ~/.ssh/nse-key.pem
-          chmod 600 ~/.ssh/nse-key.pem
-          ssh-keyscan -H "${{ secrets.DEV_EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
-          echo "StrictHostKeyChecking no" >> ~/.ssh/config
-
-      - name: Sync backend → DEV EC2
-        run: |
-          rsync -az --delete \
-            --exclude='__pycache__' --exclude='*.pyc' \
-            --exclude='.env' --exclude='worker.pid' \
-            -e "ssh -i ~/.ssh/nse-key.pem" \
-            backend/ ubuntu@${{ secrets.DEV_EC2_HOST }}:${{ env.REMOTE_DIR }}/backend/
-
-      - name: Install deps + restart services
-        run: |
-          ssh -i ~/.ssh/nse-key.pem ubuntu@${{ secrets.DEV_EC2_HOST }} << 'EOF'
-            set -e
-            cd /opt/nse
-            [ -d venv ] || python3 -m venv venv
-            source venv/bin/activate
-            pip install -r backend/requirements.txt -q
-            sudo systemctl restart nse-api
-            sudo systemctl restart nse-worker || true
-          EOF
-
-      - name: Health check
-        run: |
-          sleep 40
-          curl -fsS "http://${{ secrets.DEV_EC2_HOST }}/api/v1/health/" \
-            && echo "DEV health check passed"
-
-      - name: Download frontend artifact (dev)
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dev
-          path: build/
-
-      - name: Configure AWS credentials (dev account)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Upload frontend → DEV S3
-        run: |
-          aws s3 sync build/static/ s3://${{ secrets.DEV_S3_FRONTEND_BUCKET }}/static/ \
-            --cache-control "max-age=31536000,immutable" --delete
-          aws s3 sync build/ s3://${{ secrets.DEV_S3_FRONTEND_BUCKET }}/ \
-            --cache-control "no-cache,no-store,must-revalidate" \
-            --exclude "static/*" --delete
-
-  # ── 3. Deploy QC (qc AWS account) ────────────────────────────────────────────
-  deploy-qc:
-    name: Deploy QC
-    needs: deploy-dev
-    runs-on: ubuntu-latest
-    environment: qc
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up SSH
-        env:
-          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s' "$SSH_KEY" | sed 's/\\n/\n/g' > ~/.ssh/nse-key.pem
-          chmod 600 ~/.ssh/nse-key.pem
-          ssh-keyscan -H "${{ secrets.QC_EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
-          echo "StrictHostKeyChecking no" >> ~/.ssh/config
-
-      - name: Sync backend → QC EC2
-        run: |
-          rsync -az --delete \
-            --exclude='__pycache__' --exclude='*.pyc' \
-            --exclude='.env' --exclude='worker.pid' \
-            -e "ssh -i ~/.ssh/nse-key.pem" \
-            backend/ ubuntu@${{ secrets.QC_EC2_HOST }}:${{ env.REMOTE_DIR }}/backend/
-
-      - name: Install deps + restart services
-        run: |
-          ssh -i ~/.ssh/nse-key.pem ubuntu@${{ secrets.QC_EC2_HOST }} << 'EOF'
-            set -e
-            cd /opt/nse
-            [ -d venv ] || python3 -m venv venv
-            source venv/bin/activate
-            pip install -r backend/requirements.txt -q
-            sudo systemctl restart nse-api
-            sudo systemctl restart nse-worker || true
-          EOF
-
-      - name: Health check
-        run: |
-          sleep 40
-          curl -fsS "http://${{ secrets.QC_EC2_HOST }}/api/v1/health/" \
-            && echo "QC health check passed"
-
-      - name: Download frontend artifact (qc)
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-qc
-          path: build/
-
-      - name: Configure AWS credentials (qc account)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.QC_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.QC_AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Upload frontend → QC S3
-        run: |
-          aws s3 sync build/static/ s3://${{ secrets.QC_S3_FRONTEND_BUCKET }}/static/ \
-            --cache-control "max-age=31536000,immutable" --delete
-          aws s3 sync build/ s3://${{ secrets.QC_S3_FRONTEND_BUCKET }}/ \
-            --cache-control "no-cache,no-store,must-revalidate" \
-            --exclude "static/*" --delete
-
-  # ── 4. Deploy PROD (prod AWS account — requires approval) ────────────────────
-  deploy-prod:
-    name: Deploy PROD
-    needs: deploy-qc
-    runs-on: ubuntu-latest
-    environment: prod          # reviewer must approve in GitHub UI before this runs
+    environment: staging
     steps:
       - uses: actions/checkout@v4
 
@@ -280,15 +117,83 @@ jobs:
           ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
           echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
-      - name: Sync backend → PROD EC2
+      - name: Sync backend → /opt/nse-staging
         run: |
           rsync -az --delete \
             --exclude='__pycache__' --exclude='*.pyc' \
             --exclude='.env' --exclude='worker.pid' \
             -e "ssh -i ~/.ssh/nse-key.pem" \
-            backend/ ubuntu@${{ secrets.EC2_HOST }}:${{ env.REMOTE_DIR }}/backend/
+            backend/ ubuntu@${{ secrets.EC2_HOST }}:/opt/nse-staging/backend/
 
-      - name: Install deps + restart services
+      - name: Install deps + restart staging services
+        run: |
+          ssh -i ~/.ssh/nse-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+            set -e
+            cd /opt/nse-staging
+            [ -d venv ] || python3 -m venv venv
+            source venv/bin/activate
+            pip install -r backend/requirements.txt -q
+            sudo systemctl restart nse-api-staging
+            sudo systemctl restart nse-worker-staging || true
+          EOF
+
+      - name: Health check — STAGING
+        run: |
+          sleep 40
+          curl -fsS "http://${{ secrets.EC2_HOST }}/staging/api/v1/health/" \
+            && echo "STAGING health check passed"
+
+      - name: Download staging frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-staging
+          path: build/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload frontend → S3 /staging/
+        run: |
+          aws s3 sync build/static/ \
+            s3://${{ secrets.S3_FRONTEND_BUCKET }}/staging/static/ \
+            --cache-control "max-age=31536000,immutable" --delete
+          aws s3 sync build/ \
+            s3://${{ secrets.S3_FRONTEND_BUCKET }}/staging/ \
+            --cache-control "no-cache,no-store,must-revalidate" \
+            --exclude "static/*" --delete
+
+  # ── 3. Deploy PROD (requires approval in GitHub UI) ──────────────────────
+  deploy-prod:
+    name: Deploy PROD
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: prod          # reviewer must approve before this job runs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "$SSH_KEY" | sed 's/\\n/\n/g' > ~/.ssh/nse-key.pem
+          chmod 600 ~/.ssh/nse-key.pem
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
+
+      - name: Sync backend → /opt/nse
+        run: |
+          rsync -az --delete \
+            --exclude='__pycache__' --exclude='*.pyc' \
+            --exclude='.env' --exclude='worker.pid' \
+            -e "ssh -i ~/.ssh/nse-key.pem" \
+            backend/ ubuntu@${{ secrets.EC2_HOST }}:/opt/nse/backend/
+
+      - name: Install deps + restart prod services
         run: |
           ssh -i ~/.ssh/nse-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
             set -e
@@ -300,30 +205,32 @@ jobs:
             sudo systemctl restart nse-api
           EOF
 
-      - name: Health check
+      - name: Health check — PROD
         run: |
           sleep 40
           curl -fsS "http://${{ secrets.EC2_HOST }}/api/v1/health/" \
             && echo "PROD health check passed"
 
-      - name: Download frontend artifact (prod)
+      - name: Download prod frontend
         uses: actions/download-artifact@v4
         with:
           name: frontend-prod
           path: build/
 
-      - name: Configure AWS credentials (prod account)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Upload frontend → PROD S3
+      - name: Upload frontend → S3 root (prod)
         run: |
-          aws s3 sync build/static/ s3://${{ secrets.S3_FRONTEND_BUCKET }}/static/ \
+          aws s3 sync build/static/ \
+            s3://${{ secrets.S3_FRONTEND_BUCKET }}/static/ \
             --cache-control "max-age=31536000,immutable" --delete
-          aws s3 sync build/ s3://${{ secrets.S3_FRONTEND_BUCKET }}/ \
+          aws s3 sync build/ \
+            s3://${{ secrets.S3_FRONTEND_BUCKET }}/ \
             --cache-control "no-cache,no-store,must-revalidate" \
             --exclude "static/*" --delete
 

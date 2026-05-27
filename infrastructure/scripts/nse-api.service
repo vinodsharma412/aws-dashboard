@@ -16,7 +16,7 @@
 # Reload: sudo systemctl restart nse-api
 
 [Unit]
-Description=NSE Stock Dashboard — FastAPI
+Description=NSE Stock Dashboard — FastAPI (prod)
 After=network.target
 Wants=network.target
 
