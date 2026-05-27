@@ -1,295 +1,345 @@
-# Developer Guide — NSE Stock Dashboard (AWS Edition)
+# Developer Guide — NSE Stock Dashboard
 
-## Who is this for?
-Anyone joining the project — new developer, contractor, or your future self.
-Read this once before touching any code.
+> **New to this project? Read this first.** It covers everything you need to understand the codebase, run it locally, make changes, and deploy.
 
 ---
 
-## Project layout (30-second map)
+## Table of Contents
+1. [Project layout](#1-project-layout)
+2. [How the system works](#2-how-the-system-works)
+3. [Run locally](#3-run-locally)
+4. [Making code changes](#4-making-code-changes)
+5. [Git workflow & CI/CD pipeline](#5-git-workflow--cicd-pipeline)
+6. [Environments (dev / qc / prod)](#6-environments-dev--qc--prod)
+7. [Operations & debugging](#7-operations--debugging)
+8. [AWS services quick reference](#8-aws-services-quick-reference)
+
+---
+
+## 1. Project layout
 
 ```
 aws/
-├── backend/app/           ← FastAPI application (runs on EC2)
-│   ├── api/v1/endpoints/  ← HTTP layer ONLY — no business logic here
-│   ├── services/          ← Business logic (stock data, scraping, sentiment)
-│   ├── crud/              ← DynamoDB reads/writes — one file per table group
-│   ├── schemas/           ← Pydantic request/response models
-│   ├── core/              ← Security, roles, logging, exceptions
-│   ├── db/dynamo.py       ← DynamoDB table objects (like SQLAlchemy engine)
-│   ├── dependencies.py    ← FastAPI auth dependency (JWT → user dict)
-│   ├── config.py          ← Settings from .env (AWS_REGION, SECRET_KEY, ...)
-│   └── main.py            ← App factory, CORS, middleware, startup
+├── backend/                     ← Python FastAPI (runs on EC2)
+│   ├── app/
+│   │   ├── api/v1/endpoints/    ← HTTP routes (auth, stocks, scraping, users…)
+│   │   ├── services/            ← Business logic (stock analysis, sentiment…)
+│   │   ├── crud/                ← DynamoDB read/write — one file per table group
+│   │   ├── schemas/             ← Pydantic request/response models
+│   │   ├── core/                ← Security (JWT), roles, logging, exceptions
+│   │   ├── db/dynamo.py         ← DynamoDB table references
+│   │   ├── config.py            ← All settings (reads .env + SSM at startup)
+│   │   ├── dependencies.py      ← FastAPI auth dependency injection
+│   │   ├── main.py              ← App factory — CORS, middleware, startup
+│   │   └── worker.py            ← Playwright scraping worker (separate process)
+│   └── requirements.txt
 │
-├── frontend/              ← React SPA (hosted on S3)
-│   └── src/utils/constants.js  ← API_URL + SSE_URL (read this first!)
+├── frontend/                    ← React SPA (deployed to S3)
+│   └── src/
+│       ├── pages/               ← One folder per page (Login, Dashboard…)
+│       ├── components/          ← Reusable UI components
+│       ├── services/            ← API calls (authService, stockService…)
+│       ├── context/             ← React context (auth state)
+│       └── assets/styles/       ← Global CSS
 │
 ├── infrastructure/
-│   ├── scripts/           ← EC2 setup, deploy, nginx, systemd services
-│   ├── dynamodb/          ← Table creation script (run once)
-│   ├── iam/               ← IAM role + policy for EC2
-│   ├── cloudwatch/        ← Log groups, alarms, dashboard
-│   ├── eventbridge/       ← Scheduled rules (screener, universe refresh)
-│   └── lambda/            ← Lightweight background jobs
+│   ├── scripts/                 ← ec2_setup.sh, deploy.sh, nginx.conf, *.service
+│   ├── dynamodb/create_tables.py← Creates all DynamoDB tables
+│   ├── ssm/setup_ssm.sh         ← Stores secrets in SSM Parameter Store
+│   ├── sqs/setup_sqs.sh         ← Creates SQS scraping job queues
+│   ├── sns/setup_sns.sh         ← Creates SNS alert topic
+│   ├── iam/                     ← IAM roles for EC2 and Lambda
+│   ├── lambda/                  ← Lambda functions (screener, universe, dlq-alert)
+│   ├── eventbridge/             ← Cron schedules for Lambda
+│   ├── cloudfront/              ← CDN distribution setup
+│   └── cloudwatch/              ← Alarms and dashboard
 │
-├── docs/                  ← Architecture, setup guides, interview prep
-├── Makefile               ← All developer commands (start here)
-├── .github/workflows/     ← GitHub Actions CI/CD
-└── .gitignore
+├── .github/workflows/deploy.yml ← CI/CD pipeline (DEV → QC → PROD)
+├── Makefile                     ← Developer shortcuts
+├── ruff.toml                    ← Python lint config
+└── docs/                        ← Architecture, setup guides, this file
 ```
 
 ---
 
-## Local development (no AWS needed)
+## 2. How the system works
+
+### Request flow
+
+```
+User browser
+    │
+    ├─ REST API calls ──────────────────────────────────────────────────────────
+    │   GET /dev/api/v1/stocks/RELIANCE                                        │
+    │                          │                                                │
+    │                    Nginx (EC2)                                            │
+    │                    /dev/* → port 9001 (FastAPI dev)                      │
+    │                    /qc/*  → port 9002 (FastAPI qc)                       │
+    │                    /*     → port 9000 (FastAPI prod)                     │
+    │                          │                                                │
+    │                    FastAPI ──→ DynamoDB (read cache)                     │
+    │                            ──→ yfinance (live prices)                    │
+    │                            ──→ SQS (queue scraping job)                  │
+    │                                                                           │
+    └─ S3 (static frontend files)                                               │
+        index.html, JS, CSS                                                     │
+
+Background worker (separate process, same EC2):
+    SQS queue ──→ worker.py ──→ Playwright scrapes NSE website ──→ DynamoDB
+```
+
+### Three stages on one EC2
+
+| Stage | Port | Directory | Systemd service |
+|-------|------|-----------|-----------------|
+| prod  | 9000 | /opt/nse  | nse-api, nse-worker |
+| dev   | 9001 | /opt/nse-dev | nse-api-dev, nse-worker-dev |
+| qc    | 9002 | /opt/nse-qc  | nse-api-qc, nse-worker-qc |
+
+### Config & secrets flow
+
+```
+Startup order:
+1. Systemd sets STAGE=dev (via EnvironmentFile)
+2. config.py reads .env file (fallback values)
+3. config.py calls SSM Parameter Store to load secrets
+   (JWT key, passwords, SQS URL, SNS ARN, etc.)
+4. All settings available via: from app.config import settings
+```
+
+---
+
+## 3. Run locally
 
 ### One-time setup
 ```bash
-# 1. Backend
-cd aws/backend
-python -m venv venv
+# Clone and enter project
+git clone https://github.com/vinodsharma412/aws-dashboard.git
+cd aws-dashboard
+
+# Backend
+cd backend
+python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-
-# Copy and fill in the minimum required values
 cp .env.example .env
-# Edit .env: set SECRET_KEY to any random string, leave AWS vars blank for local use
+# Edit .env — minimum required: SECRET_KEY=any-random-string
 
-# 2. Frontend
-cd aws/frontend
+# Frontend
+cd ../frontend
 npm install
 ```
 
-### Run locally
+### Start the app (two terminals)
 ```bash
-# Terminal 1 — API (http://localhost:9000)
+# Terminal 1 — Backend API on http://localhost:9000
 make local-backend
 
-# Terminal 2 — React (http://localhost:3000)
+# Terminal 2 — React on http://localhost:3000
 make local-frontend
 ```
 
-Open http://localhost:3000 in your browser.
+Open `http://localhost:3000` → login → explore.
 
-**What works locally vs. AWS:**
+API docs (Swagger): `http://localhost:9000/docs`
+
+### What works locally vs AWS
 
 | Feature | Local | AWS |
-|---|---|---|
-| Login / Users | ✓ (DynamoDB) | ✓ (DynamoDB) |
-| Stock quotes / analysis | ✓ (yfinance) | ✓ (yfinance) |
-| Playwright scraping | ✓ (if Playwright installed) | ✓ (EC2) |
-| Avatar upload | ✗ (needs S3) | ✓ (S3) |
-| Screener cache | ✓ (Lambda not needed) | ✓ (Lambda pre-computes) |
+|---------|-------|-----|
+| Login / JWT auth | ✓ | ✓ |
+| Stock quotes & analysis | ✓ (yfinance) | ✓ |
+| Portfolio / Watchlist | ✓ (DynamoDB) | ✓ |
+| Playwright scraping | ✓ (if installed) | ✓ |
+| File/avatar upload | ✗ needs S3 | ✓ |
+| Screener cache | ✓ (computes live) | ✓ (Lambda pre-computes) |
 
-For local use you need AWS credentials configured (`aws configure`) because
-the app reads DynamoDB even locally. The free tier covers local dev usage.
-
----
-
-## How the layers talk to each other
-
-```
-Browser (React)
-    │
-    ├── REST calls ──────────────────→ API Gateway → EC2 Nginx → FastAPI
-    │   (login, stock data,                              │
-    │    portfolio, watchlist)                           ▼
-    │                                              DynamoDB
-    │
-    └── SSE streams ─────────────────→ EC2 Nginx (direct, bypasses API Gateway)
-        (scraping job progress)         │
-                                        ▼
-                                  FastAPI SSE generator (polls DynamoDB)
-```
-
-**Why two URLs?**
-API Gateway has a hard **29-second timeout**. Scraping jobs run for minutes.
-SSE streams go directly to EC2 to bypass this limit.
-
-In the React code, set in `frontend/.env`:
-- `REACT_APP_API_URL` → API Gateway URL (for all REST calls)
-- `REACT_APP_SSE_URL` → EC2 public IP (for `/scraping/events` only)
+> **Note:** Local development still uses DynamoDB. Run `aws configure` with your IAM credentials first.
 
 ---
 
-## Adding a new feature
+## 4. Making code changes
 
-### Backend: new endpoint
+### Adding a backend API endpoint
+
 ```
 1. Create  backend/app/api/v1/endpoints/your_feature.py
-2. Create  backend/app/schemas/your_feature.py        (Pydantic models)
-3. Create  backend/app/crud/your_feature_dynamo.py    (DynamoDB CRUD)
-4. Register in  backend/app/api/v1/router.py:
-       api_router.include_router(your_feature.router, prefix="/your-feature", tags=["YourFeature"])
-5. If new DynamoDB table needed: add to  infrastructure/dynamodb/create_tables.py
+   (copy an existing endpoint as a template — e.g. health.py for simple, stocks.py for complex)
+
+2. Create  backend/app/schemas/your_feature.py
+   (Pydantic models for request/response)
+
+3. Create  backend/app/crud/your_feature_dynamo.py
+   (DynamoDB reads/writes — use existing crud files as reference)
+
+4. Register the router in  backend/app/api/v1/router.py:
+   from app.api.v1.endpoints import your_feature
+   api_router.include_router(your_feature.router, prefix="/your-feature", tags=["YourFeature"])
+
+5. If you need a new DynamoDB table — add it to  infrastructure/dynamodb/create_tables.py
+   then run: STAGE=dev python3 infrastructure/dynamodb/create_tables.py
 ```
 
-### Frontend: new page
+**Layer rules (don't mix these up):**
+- `endpoints/` — HTTP only. Validate input, call service, return response. No DynamoDB calls.
+- `services/` — Business logic. No HTTP objects (`Request`/`Response`), no direct DynamoDB.
+- `crud/` — DynamoDB only. One file per table group. No logic.
+- `schemas/` — Pydantic models only. No methods.
+
+### Adding a frontend page
+
 ```
-1. Add route in  frontend/src/App.js
-2. Create page component in  frontend/src/pages/
-3. Add API call in  frontend/src/services/   (use API_URL or SSE_URL from constants.js)
+1. Create  frontend/src/pages/YourPage/index.jsx
+2. Add route in  frontend/src/App.js (or App.jsx)
+3. Add API calls in  frontend/src/services/yourService.js
+   (all API calls use REACT_APP_API_URL from environment)
+4. Add navigation link if needed (sidebar/menu component)
 ```
 
-### Rule: which layer owns what?
-- `api/v1/endpoints/` — HTTP only. No business logic, no direct DynamoDB calls.
-- `services/` — Business logic only. No HTTP concerns (no `Request`, no `Response`).
-- `crud/` — DynamoDB only. One file per table group. No business logic.
-- `schemas/` — Pydantic models only. No logic.
-
----
-
-## Deploy to AWS
-
-### First deployment (one-time infrastructure)
+### Lint before pushing
 ```bash
-# 1. Create all AWS resources
-make setup-infra        # IAM, S3, DynamoDB, API Gateway, EventBridge
+# Python
+ruff check backend/app/
 
-# 2. Launch EC2 t2.micro (see docs/02_STEP_BY_STEP_SETUP.md Phase 4)
-#    Then run the EC2 setup script ON the instance:
-bash infrastructure/scripts/ec2_setup.sh
-
-# 3. Save EC2 IP for future deployments
-echo "13.233.x.x" > aws/.ec2-host
-
-# 4. First code push
-make deploy             # pushes backend code + starts services
-make deploy-frontend    # builds React + uploads to S3
-```
-
-### Routine deployment (code changes)
-```bash
-git add .
-git commit -m "feat: your feature description"
-git push origin main
-# GitHub Actions automatically deploys both backend and frontend
-```
-
-Or deploy manually without git push:
-```bash
-make deploy             # backend only
-make deploy-frontend    # frontend only
-make deploy-all         # both
+# Frontend build test
+cd frontend && npm run build
 ```
 
 ---
 
-## Access from browser
+## 5. Git workflow & CI/CD pipeline
 
-### Local dev
-```
-React:   http://localhost:3000
-API:     http://localhost:9000/docs   (Swagger UI)
-```
+### Branch strategy
 
-### After AWS deployment
 ```
-React:   http://nse-frontend-<account>.s3-website.ap-south-1.amazonaws.com
-API docs: http://<ec2-ip>/docs
+main        ← production code only (protected)
+develop     ← active development — all PRs merge here
+release/**  ← optional: used for QC-specific fixes
 ```
 
-**Finding your URLs after deployment:**
-1. S3 URL: AWS Console → S3 → `nse-frontend-<account>` → Properties → Static website hosting → Bucket website endpoint
-2. API Gateway URL: AWS Console → API Gateway → `nse-stock-api` → Stages → prod → Invoke URL
-3. EC2 IP: AWS Console → EC2 → Instances → your instance → Public IPv4 address
+### What happens when you push code
+
+```
+git push origin develop
+        │
+        ▼
+┌─────────────────┐
+│  Lint & Test    │  ruff check + npm build
+│  (2 min)        │
+└────────┬────────┘
+         │ PASS
+         ▼
+┌─────────────────┐
+│  Deploy DEV     │  rsync → pip install → systemctl restart → health check
+│  (2 min)        │  URL: http://65.2.103.124/dev/api/v1/health/
+└────────┬────────┘
+         │ PASS (health check returns 200)
+         ▼
+┌─────────────────┐
+│  Deploy QC      │  same process on /opt/nse-qc, port 9002
+│  (2 min)        │  URL: http://65.2.103.124/qc/api/v1/health/
+└────────┬────────┘
+         │ PASS
+         ▼
+┌─────────────────┐
+│  ⏳ Waiting...  │  GitHub sends email to reviewer
+│  Approval gate  │  Reviewer clicks Approve in GitHub UI
+└────────┬────────┘
+         │ APPROVED
+         ▼
+┌─────────────────┐
+│  Deploy PROD    │  same process on /opt/nse, port 9000
+│  (2 min)        │  URL: http://65.2.103.124/api/v1/health/
+└─────────────────┘
+```
+
+**If any step FAILS** — all later stages are skipped automatically.
+**To approve PROD**: GitHub → Actions → latest run → "Review deployments" → Approve.
+
+### Monitor pipeline
+GitHub → `aws-dashboard` repo → **Actions** tab → click latest "Deploy Pipeline" run.
 
 ---
 
-## Operations commands
+## 6. Environments (dev / qc / prod)
 
-```bash
-make logs          # stream API logs (Ctrl+C to stop)
-make logs-worker   # stream Playwright worker logs
-make restart       # restart both services on EC2
-make health        # run all health checks
-make ssh           # open SSH shell to EC2
-```
+| | DEV | QC | PROD |
+|-|-----|----|------|
+| **Purpose** | Daily development | Pre-release testing | Live users |
+| **Trigger** | Auto on `develop` push | Auto after DEV passes | Manual approval |
+| **Backend URL** | `http://65.2.103.124/dev/api/v1` | `http://65.2.103.124/qc/api/v1` | `http://65.2.103.124/api/v1` |
+| **API Docs** | `http://65.2.103.124/dev/docs` | `http://65.2.103.124/qc/docs` | `http://65.2.103.124/docs` |
+| **Frontend** | S3 `/dev/` folder | S3 `/qc/` folder | S3 root `/` |
+| **DynamoDB prefix** | `dev_` | `qc_` | _(none)_ |
+| **SQS queue** | `nse-scraping-jobs-dev` | `nse-scraping-jobs-qc` | `nse-scraping-jobs` |
 
-**View logs on AWS Console:**
-- CloudWatch → Log groups → `/nse/api` → Log streams
+### Secrets (GitHub → Settings → Secrets → Actions)
 
----
-
-## Continuous deployment with GitHub Actions
-
-On every `git push origin main`:
-
-1. **Backend job**: rsync → pip install → systemctl restart → health check
-2. **Frontend job**: npm build (with prod env vars) → aws s3 sync
-
-**Setup (one time):**
-```
-GitHub repo → Settings → Secrets and variables → Actions
-Add these secrets:
-  EC2_HOST               13.233.x.x
-  EC2_SSH_KEY            (paste contents of nse-key.pem)
-  AWS_ACCESS_KEY_ID      (IAM user with S3 access)
-  AWS_SECRET_ACCESS_KEY
-  REACT_APP_API_URL      https://xxx.execute-api.ap-south-1.amazonaws.com/prod/api/v1
-  REACT_APP_SSE_URL      http://13.233.x.x
-  S3_FRONTEND_BUCKET     nse-frontend-123456789012
-```
-
-**Check workflow status:**
-GitHub repo → Actions tab → click the latest workflow run
+| Secret | Value |
+|--------|-------|
+| `EC2_HOST` | EC2 public IP |
+| `EC2_SSH_KEY` | Contents of `.pem` key file |
+| `AWS_ACCESS_KEY_ID` | IAM user key |
+| `AWS_SECRET_ACCESS_KEY` | IAM user secret |
+| `S3_FRONTEND_BUCKET` | `nse-frontend-<account-id>` |
+| `DEV_API_URL` | `http://<ec2-ip>/dev/api/v1` |
+| `DEV_SSE_URL` | `http://<ec2-ip>` |
+| `QC_API_URL` | `http://<ec2-ip>/qc/api/v1` |
+| `QC_SSE_URL` | `http://<ec2-ip>` |
 
 ---
 
-## Debugging production issues
+## 7. Operations & debugging
 
-### API returning 500
+### Useful make commands
 ```bash
-make logs                    # see the error in real time
-# or in AWS Console:
-# CloudWatch → Log groups → /nse/api → search for ERROR
+make logs              # tail DEV API logs live (Ctrl+C to stop)
+make logs STAGE=prod   # tail PROD logs
+make restart           # restart all services on EC2
+make health            # run health checks for all stages
+make ssh               # open SSH shell to EC2
 ```
 
-### Frontend not updating after deploy
+### Check service status on EC2
 ```bash
-# Force hard refresh in browser: Ctrl+Shift+R
-# Or run: make deploy-frontend   (--delete flag removes stale S3 files)
+ssh -i ~/.ssh/nse-keypair.pem ubuntu@<ec2-ip>
+
+sudo systemctl status nse-api-dev    # is it running?
+sudo journalctl -u nse-api-dev -f    # live logs
+sudo journalctl -u nse-api-dev -n 50 --no-pager  # last 50 lines
 ```
 
-### SSE stream disconnecting immediately
-```bash
-# Likely the frontend is using API_URL instead of SSE_URL for /scraping/events
-# Check: frontend/src/services/scrapingService.js  — SSE calls must use SSE_URL
-```
+### Common problems & fixes
 
-### DynamoDB errors (ThrottlingException)
-```bash
-# Free tier: 25 RCU + 25 WCU. Check CloudWatch alarm:
-# CloudWatch → Alarms → NSE-DynamoDB-Throttles
-# Fix: switch table to PAY_PER_REQUEST in create_tables.py and re-apply
-```
+| Problem | Likely cause | Fix |
+|---------|-------------|-----|
+| 502 Bad Gateway | Service not running | `sudo systemctl restart nse-api-dev` |
+| Service crashes on start | Missing .env or wrong package | `journalctl -u nse-api-dev -n 30` to see error |
+| CI SSH fails (exit 255) | EC2 security group blocks GitHub IPs | Allow SSH 0.0.0.0/0 in security group |
+| Health check timeout | App takes >40s to start | Already set to 40s sleep; check DynamoDB connectivity |
+| `No space left on device` | EC2 disk full (pip cache, venvs) | `rm -rf ~/.cache/pip /tmp/pip-*` |
+| Frontend not updating | S3 cache | Hard refresh: Ctrl+Shift+R |
+| DynamoDB ResourceNotFound | Tables not created for stage | `STAGE=dev python3 infrastructure/dynamodb/create_tables.py` |
 
-### EC2 out of memory (t2.micro has 1 GB)
-```bash
-make ssh
-free -h                       # check memory
-sudo journalctl -u nse-worker --since "5 min ago"  # Playwright uses ~400 MB
-# If OOM: reduce MAX_CONCURRENT in scraping_queue.py from 2 to 1
-```
+### View logs in AWS Console
+- CloudWatch → Log groups → `/nse/api` → Log streams → latest
 
 ---
 
-## Free tier checklist (stay $0/month)
+## 8. AWS services quick reference
 
-| Service | Free limit | Our usage | Risk |
-|---|---|---|---|
-| EC2 t2.micro | 750 hr/month | ~730 hr | Safe |
-| Elastic IP | Free when associated | 1 IP | **Unassociate = $0.005/hr** |
-| S3 | 5 GB + 20k GET | Small SPA | Safe |
-| DynamoDB | 25 GB + 25 RCU/WCU | Low traffic | Safe |
-| API Gateway | 1M calls/month | Dev traffic | Safe |
-| Lambda | 1M calls/month | 2 fns/day | Safe |
-| CloudWatch | 5 GB logs/month | ~50 MB | Safe |
-
-**Stop charges immediately:**
-```bash
-# Stop EC2 (keeps Elastic IP free):
-aws ec2 stop-instances --instance-ids <id> --region ap-south-1
-
-# WARNING: stopping EC2 while Elastic IP is still allocated = $0.005/hr charge
-# Either keep EC2 running OR release the Elastic IP when stopping.
-```
+| Service | What it does in this project |
+|---------|------------------------------|
+| EC2 | Runs FastAPI + Playwright worker (all 3 stages) |
+| S3 | Hosts React frontend + user avatar uploads |
+| DynamoDB | Main database (users, stocks, watchlists, screener cache) |
+| SQS | Queue for scraping jobs — decouples API from worker |
+| SNS | Email alerts when scraping jobs fail |
+| SSM Parameter Store | Stores secrets (JWT key, passwords, queue URLs) |
+| Lambda | Pre-computes screener cache (every 30min) + DLQ alert |
+| EventBridge | Cron triggers for Lambda functions |
+| CloudFront | CDN for S3 frontend (HTTPS, fast delivery) |
+| CloudWatch | Alarms + dashboard for EC2, DynamoDB, SQS |
+| CloudTrail | Audit log of all AWS API calls |
+| IAM | EC2 instance role — no hardcoded AWS keys on server |
+| Comprehend | ML sentiment analysis on stock news |
