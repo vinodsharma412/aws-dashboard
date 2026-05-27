@@ -1,313 +1,396 @@
 # Step-by-Step AWS Setup Guide
 
-## PHASE 1 — AWS Account & IAM
+> **One-time setup from scratch.** Follow this to go from a blank AWS account to a running three-stage deployment. If you already have AWS set up, jump to the phase you need.
 
-### Step 1.1 — Create Free AWS Account
+---
+
+## Overview
+
+What you'll set up:
+
+```
+PHASE 1  AWS account + IAM user
+PHASE 2  EC2 instance (the server)
+PHASE 3  EC2 software (Python, Nginx, systemd services)
+PHASE 4  DynamoDB tables (all 13 tables × 3 stages)
+PHASE 5  Secrets in SSM Parameter Store
+PHASE 6  SQS queues + SNS alerts
+PHASE 7  S3 buckets (frontend + avatars)
+PHASE 8  Lambda + EventBridge (background jobs)
+PHASE 9  GitHub Actions (CI/CD pipeline)
+PHASE 10 First admin user
+```
+
+---
+
+## PHASE 1 — AWS Account and IAM
+
+### 1.1 Create a free AWS account
+
 1. Go to https://aws.amazon.com/free/
-2. Click "Create a Free Account"
-3. Enter email, password, account name
-4. Choose "Personal" account type
-5. Enter credit card (required but NOT charged for free tier)
-6. Choose "Basic Support" (free)
-7. Verify phone number
-8. Select region: **Asia Pacific (Mumbai) ap-south-1**
+2. Sign up → choose **Personal** account type
+3. Credit card required but not charged within free tier
+4. Choose **Basic Support** (free)
+5. Select region: **Asia Pacific (Mumbai) — ap-south-1**
 
-### Step 1.2 — Create IAM Admin User (never use root account)
-1. Login to AWS Console → search "IAM" → open IAM
-2. Click "Users" → "Create user"
-3. Username: `nse-admin`
-4. Check "Provide user access to the AWS Management Console"
-5. Select "I want to create an IAM user"
-6. Set password → Next
-7. Click "Attach policies directly"
-8. Search and attach: `AdministratorAccess`
-9. Click "Create user"
-10. **Download the CSV** (access key + secret) — you won't see it again
-11. Logout from root, login with `nse-admin`
+### 1.2 Create an IAM admin user (never use root)
 
-### Step 1.3 — Install AWS CLI on your machine
+1. AWS Console → IAM → Users → **Create user**
+2. Username: `nse-admin`
+3. Check "Provide user access to the AWS Management Console"
+4. Select "I want to create an IAM user"
+5. Attach policy: `AdministratorAccess`
+6. Click through → **Create user**
+7. Create access keys: IAM → Users → nse-admin → **Security credentials** → Create access key
+8. **Download the CSV** — you will not see the secret again
+
+### 1.3 Install and configure AWS CLI
+
 ```bash
 # Ubuntu/Debian
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
-sudo ./aws/install
-
-# Verify
+unzip awscliv2.zip && sudo ./aws/install
 aws --version
-```
 
-### Step 1.4 — Configure AWS CLI
-```bash
+# Configure
 aws configure
-# AWS Access Key ID:     [paste from CSV]
-# AWS Secret Access Key: [paste from CSV]
-# Default region name:   ap-south-1
-# Default output format: json
+# AWS Access Key ID:     paste from CSV
+# AWS Secret Access Key: paste from CSV
+# Default region:        ap-south-1
+# Default output:        json
 ```
 
 ---
 
-## PHASE 2 — DynamoDB Tables
+## PHASE 2 — EC2 Instance
 
-### Step 2.1 — Run the table creation script
+### 2.1 Launch EC2
+
+1. AWS Console → EC2 → **Launch Instance**
+2. **Name:** `nse-stock-server`
+3. **AMI:** Ubuntu Server 22.04 LTS (Free tier)
+4. **Instance type:** t2.micro (Free tier)
+5. **Key pair:** Create new key pair
+   - Name: `nse-keypair`
+   - Type: RSA, Format: .pem
+   - **Save** `nse-keypair.pem` to `~/.ssh/` on your machine
+6. **Security Group:** Create new with these rules:
+   - SSH (port 22) from **Anywhere 0.0.0.0/0** — required for GitHub Actions CI/CD
+   - HTTP (port 80) from Anywhere
+   - Custom TCP 9000-9002 from Anywhere (optional, for direct port testing)
+7. **Storage:** 20 GB gp3 (free tier allows up to 30 GB)
+8. Launch
+
+### 2.2 Assign Elastic IP (prevents IP change on restart)
+
+1. EC2 → **Elastic IPs** → Allocate Elastic IP address → Allocate
+2. Select the new IP → Actions → **Associate Elastic IP**
+3. Choose your instance → Associate
+4. **Copy this IP** — it's used in every URL and GitHub secret
+
+### 2.3 SSH in to verify
+
 ```bash
-cd /home/vinod/Documents/Vinod/aws
-python3 infrastructure/dynamodb/create_tables.py
+chmod 400 ~/.ssh/nse-keypair.pem
+ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
+# Should see Ubuntu prompt. Type `exit` when done.
 ```
-
-This creates all 6 tables. See `infrastructure/dynamodb/create_tables.py`.
-
-### Step 2.2 — Verify in AWS Console
-1. Open AWS Console → DynamoDB → Tables
-2. You should see: `nse_users`, `nse_stock_transactions`, `nse_stock_watchlist`,
-   `nse_scraping_jobs`, `nse_scraping_tasks`, `nse_product_data`
 
 ---
 
-## PHASE 3 — S3 Buckets
+## PHASE 3 — EC2 Software Setup
 
-### Step 3.1 — Run the S3 setup script
+### 3.1 Copy and run the setup script
+
+```bash
+# From your local machine (in the project root):
+scp -i ~/.ssh/nse-keypair.pem \
+    infrastructure/scripts/ec2_setup.sh \
+    ubuntu@<YOUR-ELASTIC-IP>:~/
+
+ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
+bash ~/ec2_setup.sh
+# Takes ~10 minutes. Installs Python, Nginx, Node.js, Playwright.
+```
+
+### 3.2 Create stage directories and .env files
+
+```bash
+# On EC2:
+
+# Create directories
+sudo mkdir -p /opt/nse-dev /opt/nse-qc /opt/nse
+sudo chown -R ubuntu:ubuntu /opt/nse-dev /opt/nse-qc /opt/nse
+
+# Create Python virtualenvs
+python3 -m venv /opt/nse-dev/venv
+python3 -m venv /opt/nse-qc/venv
+python3 -m venv /opt/nse/venv
+
+# Create .env files for each stage
+# These only need STAGE — secrets come from SSM
+cat > /opt/nse-dev/.env << 'EOF'
+STAGE=dev
+APP_ENV=development
+DEBUG=true
+EOF
+
+cat > /opt/nse-qc/.env << 'EOF'
+STAGE=qc
+APP_ENV=staging
+DEBUG=false
+EOF
+
+cat > /opt/nse/.env << 'EOF'
+STAGE=prod
+APP_ENV=production
+DEBUG=false
+EOF
+```
+
+### 3.3 Install Nginx config
+
+```bash
+# From your local machine:
+scp -i ~/.ssh/nse-keypair.pem \
+    infrastructure/scripts/nginx.conf \
+    ubuntu@<YOUR-ELASTIC-IP>:~/nginx-nse.conf
+
+# On EC2:
+sudo cp ~/nginx-nse.conf /etc/nginx/sites-available/nse
+sudo ln -sf /etc/nginx/sites-available/nse /etc/nginx/sites-enabled/nse
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 3.4 Install systemd services
+
+```bash
+# From your local machine, copy all service files:
+for svc in nse-api nse-worker nse-api-dev nse-worker-dev nse-api-qc nse-worker-qc; do
+    scp -i ~/.ssh/nse-keypair.pem \
+        infrastructure/scripts/${svc}.service \
+        ubuntu@<YOUR-ELASTIC-IP>:~/${svc}.service
+done
+
+# On EC2:
+sudo cp ~/nse-*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable nse-api-dev nse-worker-dev
+sudo systemctl enable nse-api-qc nse-worker-qc
+sudo systemctl enable nse-api nse-worker
+```
+
+---
+
+## PHASE 4 — DynamoDB Tables
+
+Run from your **local machine** (or any machine with AWS CLI configured):
+
+```bash
+cd /path/to/aws
+
+# Create tables for all three stages
+STAGE=dev  python3 infrastructure/dynamodb/create_tables.py
+STAGE=qc   python3 infrastructure/dynamodb/create_tables.py
+STAGE=prod python3 infrastructure/dynamodb/create_tables.py
+```
+
+Verify in AWS Console → DynamoDB → Tables → you should see tables prefixed with `dev_`, `qc_`, and unprefixed tables for prod.
+
+---
+
+## PHASE 5 — Secrets in SSM Parameter Store
+
+Run for each stage. The script is interactive — it will prompt for each value.
+
+```bash
+bash infrastructure/ssm/setup_ssm.sh dev
+bash infrastructure/ssm/setup_ssm.sh qc
+bash infrastructure/ssm/setup_ssm.sh prod
+```
+
+**Values you'll be prompted for** (same for each stage):
+
+| Prompt | What to enter |
+|--------|---------------|
+| JWT secret | Run: `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| Gmail user | Your Gmail address (for alert emails) |
+| Gmail app password | Gmail → Security → App passwords → generate one |
+| S3 assets bucket | `nse-assets-<your-aws-account-id>` |
+| SNS alerts ARN | Leave blank for now — fill in after Phase 6 |
+
+> After Phase 6, re-run `bash infrastructure/ssm/setup_ssm.sh prod` to add the SNS ARN and SQS URL.
+
+---
+
+## PHASE 6 — SQS and SNS
+
+```bash
+# Create SQS queues (main queue + dead letter queue) for each stage
+bash infrastructure/sqs/setup_sqs.sh dev
+bash infrastructure/sqs/setup_sqs.sh qc
+bash infrastructure/sqs/setup_sqs.sh prod
+# The SQS URLs are automatically saved to SSM
+
+# Create SNS alert topics + email subscriptions
+bash infrastructure/sns/setup_sns.sh dev   your@email.com
+bash infrastructure/sns/setup_sns.sh qc    your@email.com
+bash infrastructure/sns/setup_sns.sh prod  your@email.com
+```
+
+**Important:** Check your email after each SNS command and click **Confirm subscription**. Alerts won't arrive until the subscription is confirmed.
+
+---
+
+## PHASE 7 — S3 Buckets
+
 ```bash
 bash infrastructure/scripts/s3_setup.sh
 ```
 
 This creates:
-- `nse-frontend-<your-account-id>` — static website hosting
-- `nse-assets-<your-account-id>` — avatar image storage
+- `nse-frontend-<account-id>` — React builds (one folder per stage: `/dev/`, `/qc/`, root for prod)
+- `nse-assets-<account-id>` — user avatar images (private, accessed via signed URLs)
 
-### Step 3.2 — Note your S3 website URL
-After script runs, note the URL:
-```
-http://nse-frontend-<account-id>.s3-website.ap-south-1.amazonaws.com
-```
+Note the bucket name — you'll need it for GitHub secrets.
 
 ---
 
-## PHASE 4 — EC2 Instance
+## PHASE 8 — Lambda + EventBridge (background jobs)
 
-### Step 4.1 — Launch EC2 t2.micro
-1. AWS Console → EC2 → "Launch Instance"
-2. **Name:** `nse-stock-server`
-3. **AMI:** Ubuntu Server 22.04 LTS (Free tier eligible)
-4. **Instance type:** t2.micro (Free tier eligible)
-5. **Key pair:** Click "Create new key pair"
-   - Name: `nse-keypair`
-   - Type: RSA
-   - Format: .pem
-   - **Download and save** `nse-keypair.pem` to `~/.ssh/`
-6. **Security Group:** Create new
-   - Allow SSH (port 22) from My IP
-   - Allow HTTP (port 80) from Anywhere
-   - Allow HTTPS (port 443) from Anywhere
-   - Allow Custom TCP port 9000 from Anywhere (FastAPI during dev)
-7. **Storage:** 8 GB gp2 (free tier: 30 GB max)
-8. Click "Launch Instance"
-9. Wait 2 minutes for it to start
-
-### Step 4.2 — Assign Elastic IP (so IP doesn't change on restart)
-1. EC2 → Elastic IPs → "Allocate Elastic IP address" → Allocate
-2. Select the new IP → Actions → "Associate Elastic IP"
-3. Choose your instance → Associate
-4. Note this IP — this is your server's permanent IP
-
-### Step 4.3 — SSH into EC2
 ```bash
-chmod 400 ~/.ssh/nse-keypair.pem
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
+# IAM roles first (one-time per account)
+bash infrastructure/iam/setup_ec2_role.sh
+bash infrastructure/iam/setup_lambda_role.sh
+
+# Lambda functions
+bash infrastructure/lambda/deploy_lambdas.sh prod
+
+# EventBridge cron triggers
+bash infrastructure/eventbridge/setup_eventbridge.sh prod
 ```
 
-### Step 4.4 — Run EC2 setup script
-```bash
-# Copy the setup script to EC2
-scp -i ~/.ssh/nse-keypair.pem \
-    /home/vinod/Documents/Vinod/aws/infrastructure/scripts/ec2_setup.sh \
-    ubuntu@<YOUR-ELASTIC-IP>:~/
-
-# SSH in and run it
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
-bash ~/ec2_setup.sh
-```
-
-This installs: Python 3.11, pip, virtualenv, Node.js 20, Nginx, Playwright, git.
+This sets up:
+- **nse-screener-refresh** — runs every 30 min during market hours → pre-computes screener
+- **nse-universe-refresh** — runs daily at 3 AM IST → downloads NSE symbol list
+- **nse-dlq-alert** — triggered by SQS DLQ → sends failure email via SNS
 
 ---
 
-## PHASE 5 — Deploy Backend to EC2
+## PHASE 9 — GitHub Actions (CI/CD pipeline)
 
-### Step 5.1 — Copy backend code to EC2
+### 9.1 Add GitHub Secrets
+
+GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**:
+
+| Secret | Value |
+|--------|-------|
+| `EC2_HOST` | Your Elastic IP |
+| `EC2_SSH_KEY` | Full contents of `~/.ssh/nse-keypair.pem` (including BEGIN/END lines) |
+| `AWS_ACCESS_KEY_ID` | IAM access key |
+| `AWS_SECRET_ACCESS_KEY` | IAM secret key |
+| `S3_FRONTEND_BUCKET` | `nse-frontend-<your-account-id>` |
+| `DEV_API_URL` | `http://<ELASTIC-IP>/dev/api/v1` |
+| `DEV_SSE_URL` | `http://<ELASTIC-IP>` |
+| `QC_API_URL` | `http://<ELASTIC-IP>/qc/api/v1` |
+| `QC_SSE_URL` | `http://<ELASTIC-IP>` |
+
+### 9.2 Create GitHub Environments
+
+GitHub repo → **Settings → Environments → New environment**:
+
+1. Create `dev` — no protection rules
+2. Create `qc` — no protection rules
+3. Create `prod` — Required reviewers → add your GitHub username → Save
+
+### 9.3 Deploy the first time
+
 ```bash
-# From your local machine:
-scp -i ~/.ssh/nse-keypair.pem -r \
-    /home/vinod/Documents/Vinod/aws/backend/ \
-    ubuntu@<YOUR-ELASTIC-IP>:~/nse-backend/
+git push origin develop
+# Watch GitHub → Actions → "Deploy Pipeline" run
 ```
 
-### Step 5.2 — Create .env on EC2
-```bash
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
-cd ~/nse-backend
-nano .env
-```
-
-Paste (replace values):
-```env
-APP_NAME=NSE Stock Dashboard
-APP_ENV=production
-DEBUG=false
-
-SECRET_KEY=your-very-long-random-secret-key-here
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
-
-# AWS
-AWS_REGION=ap-south-1
-S3_ASSETS_BUCKET=nse-assets-<your-account-id>
-
-# Optional
-GMAIL_USER=
-GMAIL_APP_PASSWORD=
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
-```
-
-### Step 5.3 — Install dependencies and run
-```bash
-cd ~/nse-backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-playwright install-deps chromium
-
-# Test run
-uvicorn app.main:app --host 0.0.0.0 --port 9000
-```
-
-Test from browser: `http://<YOUR-ELASTIC-IP>:9000/docs`
-
-### Step 5.4 — Configure Nginx reverse proxy
-```bash
-sudo nano /etc/nginx/sites-available/nse
-```
-
-Paste the nginx config from `infrastructure/scripts/nginx.conf`, then:
-```bash
-sudo ln -s /etc/nginx/sites-available/nse /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-### Step 5.5 — Set up systemd services
-```bash
-sudo cp ~/infrastructure/scripts/nse-api.service /etc/systemd/system/
-sudo cp ~/infrastructure/scripts/nse-worker.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable nse-api nse-worker
-sudo systemctl start nse-api nse-worker
-sudo systemctl status nse-api
-```
+The pipeline will:
+1. Lint Python + build React frontend
+2. rsync backend code to `/opt/nse-dev/backend/` on EC2
+3. `pip install`, restart `nse-api-dev`, health check
+4. Deploy frontend to S3 `/dev/` folder
+5. Repeat for QC
+6. Wait for your approval → deploy to PROD
 
 ---
 
-## PHASE 6 — Deploy Frontend to S3
+## PHASE 10 — Create First Admin User
 
-### Step 6.1 — Update API URL
-Edit `frontend/src/utils/constants.js`:
-```javascript
-export const API_URL = 'http://<YOUR-ELASTIC-IP>/api/v1';
-```
-
-### Step 6.2 — Build React app
-```bash
-cd /home/vinod/Documents/Vinod/aws/frontend
-npm install
-npm run build
-```
-
-### Step 6.3 — Upload to S3
-```bash
-aws s3 sync build/ s3://nse-frontend-<account-id>/ --delete
-```
-
-### Step 6.4 — Access the app
-Open: `http://nse-frontend-<account-id>.s3-website.ap-south-1.amazonaws.com`
-
----
-
-## PHASE 7 — VS Code Remote Development
-
-### Step 7.1 — Install Remote-SSH extension
-1. VS Code → Extensions → search "Remote - SSH"
-2. Install "Remote - SSH" by Microsoft
-
-### Step 7.2 — Add SSH host
-Press `Ctrl+Shift+P` → "Remote-SSH: Open SSH Configuration File"
-Add:
-```
-Host nse-aws
-    HostName <YOUR-ELASTIC-IP>
-    User ubuntu
-    IdentityFile ~/.ssh/nse-keypair.pem
-```
-
-### Step 7.3 — Connect
-Press `Ctrl+Shift+P` → "Remote-SSH: Connect to Host" → `nse-aws`
-
-VS Code opens connected to EC2. You can edit files directly on the server.
-
----
-
-## PHASE 8 — Create First Admin User
+After the first successful deployment, create the admin user for whichever stage you want to access:
 
 ```bash
-# SSH into EC2, then:
-cd ~/nse-backend
-source venv/bin/activate
-python3 -c "
+# SSH into EC2
+ssh -i ~/.ssh/nse-keypair.pem ubuntu@<ELASTIC-IP>
+
+# For DEV
+cd /opt/nse-dev/backend
+/opt/nse-dev/venv/bin/python3 - <<'EOF'
 from app.db.dynamo import dynamo_users
 from app.core.security import hash_password
-import uuid
+import uuid, datetime, os
+os.environ.setdefault("STAGE", "dev")
+
 dynamo_users.put_item(Item={
-    'user_id': str(uuid.uuid4()),
-    'username': 'admin',
-    'email': 'admin@example.com',
-    'full_name': 'Admin User',
-    'role': 'admin',
-    'hashed_password': hash_password('changeme123'),
-    'is_active': True,
-    'avatar_url': None,
+    "user_id": str(uuid.uuid4()),
+    "username": "admin",
+    "email": "admin@example.com",
+    "full_name": "Admin User",
+    "role": "admin",
+    "hashed_password": hash_password("changeme123"),
+    "is_active": True,
+    "created_at": datetime.datetime.utcnow().isoformat(),
 })
-print('Admin user created')
-"
+print("Admin user created for DEV — login: admin / changeme123")
+EOF
 ```
 
-Login at the frontend URL with `admin` / `changeme123`.
+Then open the frontend URL and log in with `admin` / `changeme123`. **Change the password in Settings immediately.**
 
 ---
 
-## Useful Commands
+## Useful Commands After Setup
 
 ```bash
-# Check API logs
+# Check all services on EC2
+sudo systemctl status nse-api-dev nse-api-qc nse-api
+
+# Tail logs for any stage
+sudo journalctl -u nse-api-dev -f
+sudo journalctl -u nse-api-qc -f
 sudo journalctl -u nse-api -f
 
-# Check worker logs
-sudo journalctl -u nse-worker -f
+# Verify all health endpoints
+curl http://localhost:9001/api/v1/health/   # DEV
+curl http://localhost:9002/api/v1/health/   # QC
+curl http://localhost:9000/api/v1/health/   # PROD
 
-# Restart API after code change
-sudo systemctl restart nse-api
+# Verify through Nginx
+curl http://<ELASTIC-IP>/dev/api/v1/health/
+curl http://<ELASTIC-IP>/qc/api/v1/health/
+curl http://<ELASTIC-IP>/api/v1/health/
 
-# Re-deploy frontend
-cd /home/vinod/Documents/Vinod/aws/frontend
-npm run build
-aws s3 sync build/ s3://nse-frontend-<account-id>/ --delete
+# View all SSM parameters for a stage
+aws ssm get-parameters-by-path --path /nse/prod/ --with-decryption --region ap-south-1
 
-# SSH shortcut (after VS Code SSH config)
-ssh nse-aws
-
-# Check EC2 costs (always free tier check)
-aws ce get-cost-and-usage \
-  --time-period Start=2025-01-01,End=2025-02-01 \
-  --granularity MONTHLY \
-  --metrics "BlendedCost"
+# Disk usage (watch this — EC2 disk can fill up with pip cache)
+df -h
 ```
+
+---
+
+## CloudFront (optional, PROD only)
+
+Adds HTTPS and edge caching for the React frontend.
+
+```bash
+bash infrastructure/cloudfront/setup_cloudfront.sh
+```
+
+The CloudFront distribution ID is saved to SSM at `/nse/prod/cloudfront-dist-id`. The CI/CD pipeline reads it automatically to invalidate the CDN cache after each PROD deploy.
