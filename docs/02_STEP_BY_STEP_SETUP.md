@@ -1,342 +1,342 @@
-# Step-by-Step AWS Setup Guide
+# Step-by-Step Setup Guide — Multi-Account Deployment
 
-> **One-time setup from scratch.** Follow this to go from a blank AWS account to a running three-stage deployment. If you already have AWS set up, jump to the phase you need.
+> Follow these steps in order. Each step tells you which account to be logged into, exactly what to click, and what to copy for the next step.
 
 ---
 
 ## Overview
 
-What you'll set up:
+```
+PART A  AWS Organization (one-time, ~15 min)
+PART B  Set up DEV account  (EC2 + infra, ~30 min)
+PART C  Set up QC account   (same steps as DEV, ~20 min)
+PART D  Set up PROD account (same steps as DEV, ~20 min)
+PART E  GitHub secrets + first deployment (~10 min)
+```
 
-```
-PHASE 1  AWS account + IAM user
-PHASE 2  EC2 instance (the server)
-PHASE 3  EC2 software (Python, Nginx, systemd services)
-PHASE 4  DynamoDB tables (all 13 tables × 3 stages)
-PHASE 5  Secrets in SSM Parameter Store
-PHASE 6  SQS queues + SNS alerts
-PHASE 7  S3 buckets (frontend + avatars)
-PHASE 8  Lambda + EventBridge (background jobs)
-PHASE 9  GitHub Actions (CI/CD pipeline)
-PHASE 10 First admin user
-```
+What you will have at the end:
+- 3 completely independent AWS accounts (dev / qc / prod)
+- A GitHub Actions pipeline that deploys to each account automatically
+- No DynamoDB table prefixes — `users` means `users` in every account
+- Dev code cannot access prod data even if it tries — wrong credentials
 
 ---
 
-## PHASE 1 — AWS Account and IAM
+## Before you start — collect these items
 
-### 1.1 Create a free AWS account
+You need:
+- **3 email addresses** — one per AWS account. Gmail trick: if your email is `you@gmail.com`, use `you+nsedev@gmail.com`, `you+nseqc@gmail.com`, `you+nseprod@gmail.com` (all go to the same inbox)
+- **Your existing AWS account** — this becomes the management (billing) account
+- **Your GitHub repo** — `aws-dashboard`
+- **Your local machine** — with AWS CLI installed and `~/.ssh/nse-key.pem` saved
 
-1. Go to https://aws.amazon.com/free/
-2. Sign up → choose **Personal** account type
-3. Credit card required but not charged within free tier
-4. Choose **Basic Support** (free)
-5. Select region: **Asia Pacific (Mumbai) — ap-south-1**
+---
 
-### 1.2 Create an IAM admin user (never use root)
+## PART A — AWS Organization
 
-1. AWS Console → IAM → Users → **Create user**
+### A.1 — Enable AWS Organizations
+
+> Log in as: **your existing AWS account (management account)**
+
+1. AWS Console → search **"Organizations"** → open it
+2. Click **"Create organization"**
+3. Confirm → click **"Create organization"** again
+4. Your current account is now the **management account** — this is for billing only, you will not deploy any app resources here
+
+### A.2 — Create the DEV member account
+
+Still in AWS Organizations:
+
+1. Click **"Add an AWS account"**
+2. Select **"Create an AWS account"**
+3. Fill in:
+   - **AWS account name:** `nse-dev`
+   - **Email address:** `you+nsedev@gmail.com` (or any unique email)
+   - **IAM role name:** leave as `OrganizationAccountAccessRole`
+4. Click **"Create AWS account"**
+5. Wait ~2 minutes for it to appear in the list
+
+### A.3 — Create the QC member account
+
+Repeat A.2 with:
+- **AWS account name:** `nse-qc`
+- **Email address:** `you+nseqc@gmail.com`
+
+### A.4 — Create the PROD member account
+
+Repeat A.2 with:
+- **AWS account name:** `nse-prod`
+- **Email address:** `you+nseprod@gmail.com`
+
+### A.5 — Note the account IDs
+
+In AWS Organizations → "AWS accounts" list, you will see all four accounts. **Copy the Account ID (12-digit number) for each:**
+
+| Account | Account ID | Note it here |
+|---------|-----------|--------------|
+| nse-dev  | ____________ | |
+| nse-qc   | ____________ | |
+| nse-prod | ____________ | |
+
+You will need these for S3 bucket names.
+
+---
+
+## PART B — Set up DEV account
+
+You will repeat Parts B, C, D with the same steps. Do DEV first to get familiar with the process.
+
+### B.1 — Switch to the DEV account
+
+> **How to switch accounts in AWS Console:**
+> Top-right corner → click your account name → **"Switch role"**
+> OR: Top-right → **"Switch role"** → fill in:
+> - Account ID: _(from A.5, nse-dev)_
+> - Role: `OrganizationAccountAccessRole`
+> - Display name: `nse-dev`
+> - Color: pick any (green for dev)
+> Click **"Switch role"**
+
+The top-right corner now shows `nse-dev`. You are now operating inside the DEV account.
+
+### B.2 — Create an IAM admin user (never use root for daily work)
+
+> Still in: **nse-dev account**
+
+1. AWS Console → **IAM** → **Users** → **Create user**
 2. Username: `nse-admin`
-3. Check "Provide user access to the AWS Management Console"
-4. Select "I want to create an IAM user"
-5. Attach policy: `AdministratorAccess`
-6. Click through → **Create user**
-7. Create access keys: IAM → Users → nse-admin → **Security credentials** → Create access key
-8. **Download the CSV** — you will not see the secret again
+3. Check **"Provide user access to the AWS Management Console"**
+4. Select **"I want to create an IAM user"**
+5. Set a password → Next
+6. Click **"Attach policies directly"** → search and attach `AdministratorAccess`
+7. Click **"Create user"**
+8. **Create access keys:**
+   - IAM → Users → `nse-admin` → **Security credentials** tab
+   - Click **"Create access key"** → Use case: "CLI"
+   - **Download the CSV** or copy both values now — you won't see the secret again
 
-### 1.3 Install and configure AWS CLI
+> **Save these — you'll need them for GitHub secrets:**
+> - `DEV_AWS_ACCESS_KEY_ID` = _____________________
+> - `DEV_AWS_SECRET_ACCESS_KEY` = _____________________
+
+### B.3 — Configure AWS CLI for the DEV account (local machine)
+
+Open a terminal on your local machine:
 
 ```bash
-# Ubuntu/Debian
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip && sudo ./aws/install
-aws --version
-
-# Configure
-aws configure
-# AWS Access Key ID:     paste from CSV
-# AWS Secret Access Key: paste from CSV
+aws configure --profile nse-dev
+# AWS Access Key ID:     paste DEV_AWS_ACCESS_KEY_ID
+# AWS Secret Access Key: paste DEV_AWS_SECRET_ACCESS_KEY
 # Default region:        ap-south-1
 # Default output:        json
+
+# Verify it works
+aws sts get-caller-identity --profile nse-dev
+# Should show the nse-dev account ID
 ```
 
----
+### B.4 — Launch EC2 in DEV account
 
-## PHASE 2 — EC2 Instance
+> Back in AWS Console, still in **nse-dev account**
 
-### 2.1 Launch EC2
+1. Switch region to **ap-south-1 (Mumbai)** (top-right dropdown)
+2. EC2 → **"Launch instance"**
+3. Fill in:
+   - **Name:** `nse-dev-server`
+   - **AMI:** Ubuntu Server 22.04 LTS _(Free tier eligible)_
+   - **Instance type:** t2.micro _(Free tier eligible)_
+   - **Key pair:** Click **"Create new key pair"**
+     - Name: `nse-keypair`
+     - Type: RSA, Format: `.pem`
+     - **Download** `nse-keypair.pem` → save to `~/.ssh/`
+     - _(Use the same name in every account so one key file works for all three EC2s)_
+   - **Security Group:** Create new
+     - Allow SSH (port 22) from **Anywhere 0.0.0.0/0** ← required for GitHub Actions
+     - Allow HTTP (port 80) from **Anywhere**
+   - **Storage:** 20 GB gp3
+4. Click **"Launch instance"**
 
-1. AWS Console → EC2 → **Launch Instance**
-2. **Name:** `nse-stock-server`
-3. **AMI:** Ubuntu Server 22.04 LTS (Free tier)
-4. **Instance type:** t2.micro (Free tier)
-5. **Key pair:** Create new key pair
-   - Name: `nse-keypair`
-   - Type: RSA, Format: .pem
-   - **Save** `nse-keypair.pem` to `~/.ssh/` on your machine
-6. **Security Group:** Create new with these rules:
-   - SSH (port 22) from **Anywhere 0.0.0.0/0** — required for GitHub Actions CI/CD
-   - HTTP (port 80) from Anywhere
-   - Custom TCP 9000-9002 from Anywhere (optional, for direct port testing)
-7. **Storage:** 20 GB gp3 (free tier allows up to 30 GB)
-8. Launch
+### B.5 — Assign Elastic IP to DEV EC2
 
-### 2.2 Assign Elastic IP (prevents IP change on restart)
+1. EC2 → **Elastic IPs** → **"Allocate Elastic IP address"** → Allocate
+2. Select the new IP → **Actions** → **"Associate Elastic IP address"**
+3. Instance: select `nse-dev-server` → Associate
 
-1. EC2 → **Elastic IPs** → Allocate Elastic IP address → Allocate
-2. Select the new IP → Actions → **Associate Elastic IP**
-3. Choose your instance → Associate
-4. **Copy this IP** — it's used in every URL and GitHub secret
+> **Save this — you'll need it for GitHub secrets:**
+> - `DEV_EC2_HOST` = _____________________
 
-### 2.3 SSH in to verify
+### B.6 — SSH into DEV EC2
 
 ```bash
 chmod 400 ~/.ssh/nse-keypair.pem
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
-# Should see Ubuntu prompt. Type `exit` when done.
+ssh -i ~/.ssh/nse-keypair.pem ubuntu@<DEV_EC2_HOST>
+# You should see the Ubuntu welcome message
 ```
 
----
+### B.7 — Run the EC2 setup script
 
-## PHASE 3 — EC2 Software Setup
-
-### 3.1 Copy and run the setup script
+From your **local machine** (in the project root):
 
 ```bash
-# From your local machine (in the project root):
 scp -i ~/.ssh/nse-keypair.pem \
     infrastructure/scripts/ec2_setup.sh \
-    ubuntu@<YOUR-ELASTIC-IP>:~/
-
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
-bash ~/ec2_setup.sh
-# Takes ~10 minutes. Installs Python, Nginx, Node.js, Playwright.
+    ubuntu@<DEV_EC2_HOST>:~/
 ```
 
-### 3.2 Create stage directories and .env files
+Then on EC2:
 
 ```bash
-# On EC2:
+bash ~/ec2_setup.sh
+# Takes ~10 minutes — installs Python, pip, Nginx, Node.js, Playwright
+```
 
-# Create directories
-sudo mkdir -p /opt/nse-dev /opt/nse-qc /opt/nse
-sudo chown -R ubuntu:ubuntu /opt/nse-dev /opt/nse-qc /opt/nse
+### B.8 — Create directory structure on DEV EC2
 
-# Create Python virtualenvs
-python3 -m venv /opt/nse-dev/venv
-python3 -m venv /opt/nse-qc/venv
+Still on the EC2 SSH session:
+
+```bash
+# Create app directory
+sudo mkdir -p /opt/nse
+sudo chown ubuntu:ubuntu /opt/nse
+
+# Create Python virtualenv
 python3 -m venv /opt/nse/venv
 
-# Create .env files for each stage
-# These only need STAGE — secrets come from SSM
-cat > /opt/nse-dev/.env << 'EOF'
+# Create .env file — this is what tells the app it's the DEV stage
+cat > /opt/nse/.env << 'EOF'
 STAGE=dev
 APP_ENV=development
 DEBUG=true
 EOF
-
-cat > /opt/nse-qc/.env << 'EOF'
-STAGE=qc
-APP_ENV=staging
-DEBUG=false
-EOF
-
-cat > /opt/nse/.env << 'EOF'
-STAGE=prod
-APP_ENV=production
-DEBUG=false
-EOF
 ```
 
-### 3.3 Install Nginx config
+### B.9 — Install Nginx config
+
+From your **local machine**:
 
 ```bash
-# From your local machine:
 scp -i ~/.ssh/nse-keypair.pem \
     infrastructure/scripts/nginx.conf \
-    ubuntu@<YOUR-ELASTIC-IP>:~/nginx-nse.conf
+    ubuntu@<DEV_EC2_HOST>:~/
+```
 
-# On EC2:
-sudo cp ~/nginx-nse.conf /etc/nginx/sites-available/nse
+On EC2:
+
+```bash
+sudo cp ~/nginx.conf /etc/nginx/sites-available/nse
 sudo ln -sf /etc/nginx/sites-available/nse /etc/nginx/sites-enabled/nse
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-### 3.4 Install systemd services
+### B.10 — Install systemd services
+
+From your **local machine**:
 
 ```bash
-# From your local machine, copy all service files:
-for svc in nse-api nse-worker nse-api-dev nse-worker-dev nse-api-qc nse-worker-qc; do
-    scp -i ~/.ssh/nse-keypair.pem \
-        infrastructure/scripts/${svc}.service \
-        ubuntu@<YOUR-ELASTIC-IP>:~/${svc}.service
-done
+scp -i ~/.ssh/nse-keypair.pem \
+    infrastructure/scripts/nse-api.service \
+    infrastructure/scripts/nse-worker.service \
+    ubuntu@<DEV_EC2_HOST>:~/
+```
 
-# On EC2:
-sudo cp ~/nse-*.service /etc/systemd/system/
+On EC2:
+
+```bash
+sudo cp ~/nse-api.service /etc/systemd/system/
+sudo cp ~/nse-worker.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable nse-api-dev nse-worker-dev
-sudo systemctl enable nse-api-qc nse-worker-qc
 sudo systemctl enable nse-api nse-worker
+# Do NOT start yet — there's no backend code here yet
 ```
 
----
+### B.11 — Create IAM role for EC2 (allows DynamoDB/S3/SSM access without keys)
 
-## PHASE 4 — DynamoDB Tables
-
-Run from your **local machine** (or any machine with AWS CLI configured):
+From your **local machine** (using the nse-dev profile):
 
 ```bash
-cd /path/to/aws
-
-# Create tables for all three stages
-STAGE=dev  python3 infrastructure/dynamodb/create_tables.py
-STAGE=qc   python3 infrastructure/dynamodb/create_tables.py
-STAGE=prod python3 infrastructure/dynamodb/create_tables.py
+AWS_PROFILE=nse-dev bash infrastructure/iam/setup_ec2_role.sh
 ```
 
-Verify in AWS Console → DynamoDB → Tables → you should see tables prefixed with `dev_`, `qc_`, and unprefixed tables for prod.
+Then attach the role to the EC2:
 
----
+1. AWS Console (nse-dev) → EC2 → select `nse-dev-server`
+2. **Actions** → **Security** → **"Modify IAM role"**
+3. Select `NSEStockDashboardEC2Role` → **Update IAM role**
 
-## PHASE 5 — Secrets in SSM Parameter Store
+### B.12 — Create DynamoDB tables
 
-Run for each stage. The script is interactive — it will prompt for each value.
+From your **local machine**:
 
 ```bash
-bash infrastructure/ssm/setup_ssm.sh dev
-bash infrastructure/ssm/setup_ssm.sh qc
-bash infrastructure/ssm/setup_ssm.sh prod
+AWS_PROFILE=nse-dev STAGE=dev python3 infrastructure/dynamodb/create_tables.py
 ```
 
-**Values you'll be prompted for** (same for each stage):
+Verify: AWS Console (nse-dev) → DynamoDB → Tables → you should see `users`, `stock_transactions`, `stock_watchlist`, `scraping_jobs`, `scraping_tasks`, `product_data`, and more.
 
-| Prompt | What to enter |
-|--------|---------------|
-| JWT secret | Run: `python3 -c "import secrets; print(secrets.token_hex(32))"` |
-| Gmail user | Your Gmail address (for alert emails) |
-| Gmail app password | Gmail → Security → App passwords → generate one |
-| S3 assets bucket | `nse-assets-<your-aws-account-id>` |
-| SNS alerts ARN | Leave blank for now — fill in after Phase 6 |
-
-> After Phase 6, re-run `bash infrastructure/ssm/setup_ssm.sh prod` to add the SNS ARN and SQS URL.
-
----
-
-## PHASE 6 — SQS and SNS
+### B.13 — Create S3 buckets
 
 ```bash
-# Create SQS queues (main queue + dead letter queue) for each stage
-bash infrastructure/sqs/setup_sqs.sh dev
-bash infrastructure/sqs/setup_sqs.sh qc
-bash infrastructure/sqs/setup_sqs.sh prod
-# The SQS URLs are automatically saved to SSM
-
-# Create SNS alert topics + email subscriptions
-bash infrastructure/sns/setup_sns.sh dev   your@email.com
-bash infrastructure/sns/setup_sns.sh qc    your@email.com
-bash infrastructure/sns/setup_sns.sh prod  your@email.com
-```
-
-**Important:** Check your email after each SNS command and click **Confirm subscription**. Alerts won't arrive until the subscription is confirmed.
-
----
-
-## PHASE 7 — S3 Buckets
-
-```bash
-bash infrastructure/scripts/s3_setup.sh
+AWS_PROFILE=nse-dev bash infrastructure/scripts/s3_setup.sh
 ```
 
 This creates:
-- `nse-frontend-<account-id>` — React builds (one folder per stage: `/dev/`, `/qc/`, root for prod)
-- `nse-assets-<account-id>` — user avatar images (private, accessed via signed URLs)
+- `nse-frontend-<dev-account-id>` — React builds
+- `nse-assets-<dev-account-id>` — user avatars
 
-Note the bucket name — you'll need it for GitHub secrets.
+> **Save the frontend bucket name:**
+> - `DEV_S3_FRONTEND_BUCKET` = `nse-frontend-<dev-account-id>` = _____________________
 
----
-
-## PHASE 8 — Lambda + EventBridge (background jobs)
+### B.14 — Store secrets in SSM Parameter Store
 
 ```bash
-# IAM roles first (one-time per account)
-bash infrastructure/iam/setup_ec2_role.sh
-bash infrastructure/iam/setup_lambda_role.sh
-
-# Lambda functions
-bash infrastructure/lambda/deploy_lambdas.sh prod
-
-# EventBridge cron triggers
-bash infrastructure/eventbridge/setup_eventbridge.sh prod
+AWS_PROFILE=nse-dev bash infrastructure/ssm/setup_ssm.sh dev
 ```
 
-This sets up:
-- **nse-screener-refresh** — runs every 30 min during market hours → pre-computes screener
-- **nse-universe-refresh** — runs daily at 3 AM IST → downloads NSE symbol list
-- **nse-dlq-alert** — triggered by SQS DLQ → sends failure email via SNS
+You will be prompted for each value:
 
----
+| Prompt | What to enter |
+|--------|---------------|
+| JWT secret | Run: `python3 -c "import secrets; print(secrets.token_hex(32))"` and paste |
+| Gmail user | Your Gmail address |
+| Gmail app password | Gmail → Security → App passwords → generate one |
+| S3 assets bucket | `nse-assets-<dev-account-id>` |
+| SNS alerts ARN | Press Enter (skip — fill in after step B.16) |
 
-## PHASE 9 — GitHub Actions (CI/CD pipeline)
-
-### 9.1 Add GitHub Secrets
-
-GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**:
-
-| Secret | Value |
-|--------|-------|
-| `EC2_HOST` | Your Elastic IP |
-| `EC2_SSH_KEY` | Full contents of `~/.ssh/nse-keypair.pem` (including BEGIN/END lines) |
-| `AWS_ACCESS_KEY_ID` | IAM access key |
-| `AWS_SECRET_ACCESS_KEY` | IAM secret key |
-| `S3_FRONTEND_BUCKET` | `nse-frontend-<your-account-id>` |
-| `DEV_API_URL` | `http://<ELASTIC-IP>/dev/api/v1` |
-| `DEV_SSE_URL` | `http://<ELASTIC-IP>` |
-| `QC_API_URL` | `http://<ELASTIC-IP>/qc/api/v1` |
-| `QC_SSE_URL` | `http://<ELASTIC-IP>` |
-
-### 9.2 Create GitHub Environments
-
-GitHub repo → **Settings → Environments → New environment**:
-
-1. Create `dev` — no protection rules
-2. Create `qc` — no protection rules
-3. Create `prod` — Required reviewers → add your GitHub username → Save
-
-### 9.3 Deploy the first time
+### B.15 — Create SQS queues
 
 ```bash
-git push origin develop
-# Watch GitHub → Actions → "Deploy Pipeline" run
+AWS_PROFILE=nse-dev bash infrastructure/sqs/setup_sqs.sh dev
+# The SQS URL is saved to SSM automatically
 ```
 
-The pipeline will:
-1. Lint Python + build React frontend
-2. rsync backend code to `/opt/nse-dev/backend/` on EC2
-3. `pip install`, restart `nse-api-dev`, health check
-4. Deploy frontend to S3 `/dev/` folder
-5. Repeat for QC
-6. Wait for your approval → deploy to PROD
-
----
-
-## PHASE 10 — Create First Admin User
-
-After the first successful deployment, create the admin user for whichever stage you want to access:
+### B.16 — Create SNS alert topic
 
 ```bash
-# SSH into EC2
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<ELASTIC-IP>
+AWS_PROFILE=nse-dev bash infrastructure/sns/setup_sns.sh dev your@email.com
+```
 
-# For DEV
-cd /opt/nse-dev/backend
-/opt/nse-dev/venv/bin/python3 - <<'EOF'
+**Important:** Check your email inbox and click **"Confirm subscription"**. You will not receive alerts until you confirm.
+
+Then re-run SSM setup to save the SNS ARN:
+
+```bash
+AWS_PROFILE=nse-dev bash infrastructure/ssm/setup_ssm.sh dev
+# When prompted for SNS ARN: paste the ARN printed by the sns script above
+# For other prompts: press Enter to keep existing values
+```
+
+### B.17 — Create the first admin user
+
+The pipeline will deploy the code, but you need an admin user to log in. Run this **after the first pipeline run** (the code needs to be on EC2 first):
+
+```bash
+ssh -i ~/.ssh/nse-keypair.pem ubuntu@<DEV_EC2_HOST>
+cd /opt/nse/backend
+/opt/nse/venv/bin/python3 - << 'EOF'
 from app.db.dynamo import dynamo_users
 from app.core.security import hash_password
-import uuid, datetime, os
-os.environ.setdefault("STAGE", "dev")
-
+import uuid, datetime
 dynamo_users.put_item(Item={
     "user_id": str(uuid.uuid4()),
     "username": "admin",
@@ -347,50 +347,228 @@ dynamo_users.put_item(Item={
     "is_active": True,
     "created_at": datetime.datetime.utcnow().isoformat(),
 })
-print("Admin user created for DEV — login: admin / changeme123")
+print("Admin created — login: admin / changeme123")
 EOF
 ```
 
-Then open the frontend URL and log in with `admin` / `changeme123`. **Change the password in Settings immediately.**
+> **DEV account setup is complete.**
 
 ---
 
-## Useful Commands After Setup
+## PART C — Set up QC account
+
+> Switch to **nse-qc** account in AWS Console (same method as B.1)
+
+Repeat every step from Part B with these substitutions:
+
+| Part B value | Part C value |
+|-------------|-------------|
+| `nse-dev-server` (EC2 name) | `nse-qc-server` |
+| `STAGE=dev` in .env | `STAGE=qc` |
+| `APP_ENV=development` | `APP_ENV=staging` |
+| `DEBUG=true` | `DEBUG=false` |
+| `--profile nse-dev` | `--profile nse-qc` |
+| `nse-dev` (profile name in `aws configure`) | `nse-qc` |
+
+> **Save for GitHub secrets:**
+> - `QC_EC2_HOST` = _____________________
+> - `QC_AWS_ACCESS_KEY_ID` = _____________________
+> - `QC_AWS_SECRET_ACCESS_KEY` = _____________________
+> - `QC_S3_FRONTEND_BUCKET` = `nse-frontend-<qc-account-id>` = _____________________
+
+> **QC account setup is complete.**
+
+---
+
+## PART D — Set up PROD account
+
+> Switch to **nse-prod** account in AWS Console
+
+Repeat every step from Part B with these substitutions:
+
+| Part B value | Part D value |
+|-------------|-------------|
+| `nse-dev-server` (EC2 name) | `nse-prod-server` |
+| `STAGE=dev` in .env | `STAGE=prod` |
+| `APP_ENV=development` | `APP_ENV=production` |
+| `DEBUG=true` | `DEBUG=false` |
+| `--profile nse-dev` | `--profile nse-prod` |
+| `nse-dev` (profile name in `aws configure`) | `nse-prod` |
+
+> **Save for GitHub secrets:**
+> - `EC2_HOST` = _____________________  _(this is the prod EC2 IP)_
+> - `AWS_ACCESS_KEY_ID` = _____________________
+> - `AWS_SECRET_ACCESS_KEY` = _____________________
+> - `S3_FRONTEND_BUCKET` = `nse-frontend-<prod-account-id>` = _____________________
+
+> **PROD account setup is complete.**
+
+---
+
+## PART E — GitHub Secrets and First Deployment
+
+### E.1 — Add all secrets to GitHub
+
+Open your GitHub repo → **Settings** → **Secrets and variables** → **Actions**
+
+Click **"New repository secret"** for each row:
+
+**Shared:**
+| Secret name | Value |
+|-------------|-------|
+| `EC2_SSH_KEY` | Full contents of `~/.ssh/nse-keypair.pem` (open the file, copy everything including `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----`) |
+
+**DEV account:**
+| Secret name | Value |
+|-------------|-------|
+| `DEV_EC2_HOST` | DEV EC2 Elastic IP (from B.5) |
+| `DEV_AWS_ACCESS_KEY_ID` | From B.2 |
+| `DEV_AWS_SECRET_ACCESS_KEY` | From B.2 |
+| `DEV_S3_FRONTEND_BUCKET` | From B.13 |
+| `DEV_API_URL` | `http://<DEV_EC2_HOST>/api/v1` |
+| `DEV_SSE_URL` | `http://<DEV_EC2_HOST>` |
+
+**QC account:**
+| Secret name | Value |
+|-------------|-------|
+| `QC_EC2_HOST` | QC EC2 Elastic IP (from Part C) |
+| `QC_AWS_ACCESS_KEY_ID` | From Part C |
+| `QC_AWS_SECRET_ACCESS_KEY` | From Part C |
+| `QC_S3_FRONTEND_BUCKET` | From Part C |
+| `QC_API_URL` | `http://<QC_EC2_HOST>/api/v1` |
+| `QC_SSE_URL` | `http://<QC_EC2_HOST>` |
+
+**PROD account:**
+| Secret name | Value |
+|-------------|-------|
+| `EC2_HOST` | PROD EC2 Elastic IP (from Part D) |
+| `AWS_ACCESS_KEY_ID` | From Part D |
+| `AWS_SECRET_ACCESS_KEY` | From Part D |
+| `S3_FRONTEND_BUCKET` | From Part D |
+| `PROD_API_URL` | `http://<EC2_HOST>/api/v1` |
+| `PROD_SSE_URL` | `http://<EC2_HOST>` |
+
+### E.2 — Verify GitHub Environments exist
+
+GitHub repo → **Settings** → **Environments**
+
+You need three environments: `dev`, `qc`, `prod`
+
+If they don't exist:
+1. Click **"New environment"** → name: `dev` → no protection → **Configure environment**
+2. Repeat for `qc`
+3. Click **"New environment"** → name: `prod` → tick **"Required reviewers"** → add your GitHub username → **Save protection rules**
+
+### E.3 — Trigger the first deployment
 
 ```bash
-# Check all services on EC2
-sudo systemctl status nse-api-dev nse-api-qc nse-api
+# On your local machine (in the project root):
+git push origin develop
+```
 
-# Tail logs for any stage
-sudo journalctl -u nse-api-dev -f
-sudo journalctl -u nse-api-qc -f
+Go to GitHub → **Actions** tab → click **"Deploy Pipeline"** → watch it run.
+
+**What you should see:**
+1. Lint & Test — builds 3 frontends (takes ~3 min)
+2. Deploy DEV — SSH to DEV EC2, rsync, restart, health check (takes ~3 min)
+3. Deploy QC — same on QC EC2 (takes ~3 min)
+4. ⏳ Waiting for approval — GitHub sends you an email
+5. You click **"Review deployments"** in GitHub → approve `prod`
+6. Deploy PROD — runs automatically
+
+### E.4 — Create admin user on each stage
+
+After the first successful pipeline run, SSH into each EC2 and create the admin user (see step B.17). Do this for DEV, QC, and PROD.
+
+### E.5 — Verify everything is working
+
+```bash
+# From your local machine, test each stage:
+curl http://<DEV_EC2_HOST>/api/v1/health/   # should return {"status":"ok"}
+curl http://<QC_EC2_HOST>/api/v1/health/    # should return {"status":"ok"}
+curl http://<EC2_HOST>/api/v1/health/       # should return {"status":"ok"}
+```
+
+Open the frontend URLs in your browser:
+- DEV: `http://nse-frontend-<dev-account-id>.s3-website.ap-south-1.amazonaws.com`
+- QC: `http://nse-frontend-<qc-account-id>.s3-website.ap-south-1.amazonaws.com`
+- PROD: `http://nse-frontend-<prod-account-id>.s3-website.ap-south-1.amazonaws.com`
+
+Log in with `admin` / `changeme123` → **change the password immediately in Settings**.
+
+---
+
+## Checklist — do this once per account
+
+Use this to track your progress:
+
+### DEV account
+- [ ] IAM admin user created, access keys saved
+- [ ] AWS CLI profile `nse-dev` configured
+- [ ] EC2 launched, Elastic IP assigned, SSH works
+- [ ] `ec2_setup.sh` completed
+- [ ] `/opt/nse/.env` with `STAGE=dev` created
+- [ ] Nginx config installed and active
+- [ ] systemd services installed (enabled, not yet started)
+- [ ] EC2 IAM role attached
+- [ ] DynamoDB tables created
+- [ ] S3 buckets created
+- [ ] SSM secrets stored (JWT, Gmail, S3 bucket)
+- [ ] SQS queue created
+- [ ] SNS topic created, subscription email confirmed
+
+### QC account
+- [ ] (same checklist as DEV)
+
+### PROD account
+- [ ] (same checklist as DEV)
+
+### GitHub
+- [ ] All 19 secrets added (EC2_SSH_KEY + 6 per account)
+- [ ] Environments `dev`, `qc`, `prod` created
+- [ ] `prod` environment has required reviewer set
+- [ ] First pipeline run completed successfully
+- [ ] Admin user created on each stage
+
+---
+
+## Quick reference — useful commands after setup
+
+```bash
+# Switch AWS CLI profile per-account
+export AWS_PROFILE=nse-dev   # or nse-qc / nse-prod
+
+# Check DynamoDB tables in an account
+aws dynamodb list-tables --region ap-south-1
+
+# Check SSM parameters in an account
+aws ssm get-parameters-by-path --path /nse/ --with-decryption --region ap-south-1
+
+# SSH into each stage
+ssh -i ~/.ssh/nse-keypair.pem ubuntu@<DEV_EC2_HOST>
+ssh -i ~/.ssh/nse-keypair.pem ubuntu@<QC_EC2_HOST>
+ssh -i ~/.ssh/nse-keypair.pem ubuntu@<EC2_HOST>
+
+# Check service status on any EC2
+sudo systemctl status nse-api nse-worker
+
+# Tail logs
 sudo journalctl -u nse-api -f
 
-# Verify all health endpoints
-curl http://localhost:9001/api/v1/health/   # DEV
-curl http://localhost:9002/api/v1/health/   # QC
-curl http://localhost:9000/api/v1/health/   # PROD
-
-# Verify through Nginx
-curl http://<ELASTIC-IP>/dev/api/v1/health/
-curl http://<ELASTIC-IP>/qc/api/v1/health/
-curl http://<ELASTIC-IP>/api/v1/health/
-
-# View all SSM parameters for a stage
-aws ssm get-parameters-by-path --path /nse/prod/ --with-decryption --region ap-south-1
-
-# Disk usage (watch this — EC2 disk can fill up with pip cache)
-df -h
+# Re-run infra setup for one account (e.g. after a change)
+AWS_PROFILE=nse-dev STAGE=dev python3 infrastructure/dynamodb/create_tables.py
+AWS_PROFILE=nse-dev bash infrastructure/ssm/setup_ssm.sh dev
 ```
 
 ---
 
-## CloudFront (optional, PROD only)
+## Troubleshooting
 
-Adds HTTPS and edge caching for the React frontend.
-
-```bash
-bash infrastructure/cloudfront/setup_cloudfront.sh
-```
-
-The CloudFront distribution ID is saved to SSM at `/nse/prod/cloudfront-dist-id`. The CI/CD pipeline reads it automatically to invalidate the CDN cache after each PROD deploy.
+| Problem | Fix |
+|---------|-----|
+| `Access Denied` when running aws commands | Wrong profile — check `AWS_PROFILE=nse-dev` is set |
+| SSH times out | Security group is missing SSH rule from 0.0.0.0/0 |
+| Health check fails in pipeline | Service not started — SSH in and check `sudo journalctl -u nse-api -n 50` |
+| `ResourceNotFoundException` (DynamoDB) | Tables not created — run `AWS_PROFILE=nse-xxx STAGE=xxx python3 infrastructure/dynamodb/create_tables.py` |
+| EC2 role not found | `setup_ec2_role.sh` not run for this account — run it with the correct profile |
+| Pipeline uses wrong account | GitHub secret has wrong key — double-check that `DEV_AWS_ACCESS_KEY_ID` belongs to the nse-dev account (not nse-prod) |
