@@ -108,7 +108,7 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 10
+          sleep 40
           curl -fsS "http://${{ secrets.EC2_HOST }}/dev/api/v1/health/" \
             && echo "DEV health check passed"
 
@@ -175,7 +175,7 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 10
+          sleep 40
           curl -fsS "http://${{ secrets.EC2_HOST }}/qc/api/v1/health/" \
             && echo "QC health check passed"
 
@@ -221,7 +221,7 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 10
+          sleep 40
           curl -fsS "http://${{ secrets.EC2_HOST }}/api/v1/health/" \
             && echo "PROD health check passed"
 
