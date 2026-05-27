@@ -84,7 +84,8 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s' "$SSH_KEY" | sed 's/\\n/\n/g' > ~/.ssh/nse-key.pem
           chmod 600 ~/.ssh/nse-key.pem
-          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
       - name: Sync backend
         run: |
@@ -151,7 +152,8 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s' "$SSH_KEY" | sed 's/\\n/\n/g' > ~/.ssh/nse-key.pem
           chmod 600 ~/.ssh/nse-key.pem
-          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
       - name: Sync backend
         run: |
@@ -197,7 +199,8 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s' "$SSH_KEY" | sed 's/\\n/\n/g' > ~/.ssh/nse-key.pem
           chmod 600 ~/.ssh/nse-key.pem
-          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
       - name: Sync backend
         run: |
