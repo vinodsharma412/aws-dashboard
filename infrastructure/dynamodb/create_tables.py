@@ -3,18 +3,16 @@
 Run from the project root (AWS CLI or instance profile must be configured):
 
     # Create tables for one stage
-    STAGE=dev  python3 infrastructure/dynamodb/create_tables.py
-    STAGE=qc   python3 infrastructure/dynamodb/create_tables.py
-    STAGE=prod python3 infrastructure/dynamodb/create_tables.py  # no prefix
+    STAGE=staging python3 infrastructure/dynamodb/create_tables.py
+    STAGE=prod    python3 infrastructure/dynamodb/create_tables.py  # no prefix
 
     # Or via Makefile (uses STAGE variable)
-    make dynamo-tables           # defaults to STAGE=dev
+    make dynamo-tables              # defaults to STAGE=staging
     make dynamo-tables STAGE=prod
 
 Table naming:
-    dev  →  dev_{name}    (e.g. dev_users, dev_scraping_tasks)
-    qc   →  qc_{name}     (e.g. qc_users,  qc_scraping_tasks)
-    prod →  {name}         (e.g. users,     scraping_tasks)
+    staging →  stg_{name}  (e.g. stg_users, stg_scraping_tasks)
+    prod    →  {name}       (e.g. users,     scraping_tasks)
 
 All tables use on-demand billing (PAY_PER_REQUEST) — no capacity planning
 needed and cost is zero within the DynamoDB Free Tier (25 GB storage,
@@ -28,14 +26,14 @@ import boto3
 from botocore.exceptions import ClientError
 
 REGION = os.environ.get("AWS_REGION", "ap-south-1")
-STAGE  = os.environ.get("STAGE", "dev").lower()
+STAGE  = os.environ.get("STAGE", "staging").lower()
 
-if STAGE not in ("dev", "qc", "prod"):
-    print(f"ERROR: STAGE must be dev, qc, or prod — got '{STAGE}'", file=sys.stderr)
+if STAGE not in ("staging", "prod"):
+    print(f"ERROR: STAGE must be staging or prod — got '{STAGE}'", file=sys.stderr)
     sys.exit(1)
 
-# prod tables have no prefix; dev/qc tables use "{stage}_" prefix
-PREFIX = "" if STAGE == "prod" else f"{STAGE}_"
+# prod tables have no prefix; staging tables use "stg_" prefix
+PREFIX = "" if STAGE == "prod" else "stg_"
 
 db = boto3.client("dynamodb", region_name=REGION)
 
