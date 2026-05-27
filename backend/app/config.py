@@ -1,15 +1,16 @@
-"""Application configuration — two-stage AWS edition.
+"""Application configuration — two-account AWS edition.
 
-Two deployment stages:
-  ``staging`` — shared test environment, auto-deploys on every push.
+Two deployment stages, each in its own AWS account:
+  ``staging`` — separate AWS account, auto-deploys on every push.
                 Developers also use this stage locally.
-  ``prod``    — live users, requires manual approval before deploy.
+  ``prod``    — separate AWS account, requires manual approval before deploy.
 
-Each stage gets its own:
-  - DynamoDB table prefix  (``stg_`` for staging, none for prod)
-  - SQS queue              (``nse-scraping-jobs-staging`` / ``nse-scraping-jobs``)
+Each account has its own isolated:
+  - DynamoDB tables        (identical names — no prefix needed, separate accounts)
+  - SQS queue              (``nse-scraping-jobs`` in both accounts)
   - SSM parameter paths    (``/nse/staging/`` / ``/nse/prod/``)
-  - SNS alert topic        (``nse-alerts-staging`` / ``nse-alerts``)
+  - SNS alert topic        (``nse-alerts`` in both accounts)
+  - S3 buckets             (separate bucket per account)
 
 Secrets are loaded from SSM Parameter Store at startup (free tier, SecureString).
 For local development the same values can be placed in ``backend/.env`` and the
@@ -130,17 +131,17 @@ class Settings(BaseSettings):
 
     @property
     def table_prefix(self) -> str:
-        """DynamoDB table name prefix for the current stage.
+        """DynamoDB table name prefix.
 
-        Both stages run on the same EC2 and same AWS account, so prefixes
-        prevent staging code from ever touching production data.
+        Each stage runs in its own AWS account so table names are identical
+        in both accounts — no prefix is needed for isolation.
 
         Examples::
 
-            prod    → ""      → table name: "users"
-            staging → "stg_"  → table name: "stg_users"
+            staging → ""  → table name: "users"  (in staging account)
+            prod    → ""  → table name: "users"  (in prod account)
         """
-        return "" if self.STAGE == "prod" else "stg_"
+        return ""
 
     @property
     def is_production(self) -> bool:
