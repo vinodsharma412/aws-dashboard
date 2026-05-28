@@ -121,6 +121,17 @@ test-prod:
 	@echo "→ Running prod smoke tests..."
 	@bash infrastructure/scripts/test_staging.sh $(EC2_HOST)
 
+# ── Data migration ────────────────────────────────────────────────────────────
+pg-to-dynamo:
+	@echo "→ Migrating PostgreSQL ERP → DynamoDB (STAGE=$(STAGE))"
+	@echo "  PG_DSN must be set.  Example:"
+	@echo '    make pg-to-dynamo STAGE=staging PG_DSN="postgresql://user:pass@localhost/erp_db"'
+	STAGE=$(STAGE) PG_DSN=$(PG_DSN) python3 infrastructure/scripts/pg_to_dynamo.py
+
+pg-to-dynamo-dry:
+	@echo "→ Dry run — PostgreSQL ERP tables (no DynamoDB writes)"
+	PG_DSN=$(PG_DSN) DRY_RUN=1 python3 infrastructure/scripts/pg_to_dynamo.py
+
 # ── Infrastructure (one-time per account) ─────────────────────────────────────
 dynamo-tables:
 	@echo "→ Creating DynamoDB tables for STAGE=$(STAGE)"
