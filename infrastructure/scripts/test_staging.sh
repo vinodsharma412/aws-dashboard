@@ -118,8 +118,8 @@ JOB_RESPONSE=$(curl -fsS -X POST "${BASE}/scraping/jobs" \
     -H "Content-Type: application/json" \
     -d '{"asins":["B09XYZ1234"]}' 2>/dev/null || true)
 
-if echo "$JOB_RESPONSE" | grep -q '"job_id"'; then
-    ok "Create scraping job — job_id returned"
+if echo "$JOB_RESPONSE" | grep -q '"id"'; then
+    ok "Create scraping job — id returned"
 else
     fail "Create scraping job (got: ${JOB_RESPONSE:0:120})"
 fi
