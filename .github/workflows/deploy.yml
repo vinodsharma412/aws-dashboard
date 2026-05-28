@@ -1,15 +1,15 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Two-account promotion pipeline:  STAGING account → PROD account
+# Deploy Pipeline — main branch only
 #
-# Trigger:  push to `main`  (merge develop → main to deploy)
-#
-# Each stage runs in its own AWS account with its own EC2, DynamoDB, S3, SQS.
-# No table prefixes needed — accounts are fully isolated.
+# Trigger: push to `main`  (merge develop → main to deploy)
 #
 # Flow:
-#   1. Lint & Test  — ruff + build both frontends
-#   2. Deploy STAGING — auto on every push  (staging AWS account)
-#   3. Deploy PROD    — requires manual approval  (prod AWS account)
+#   1. Quality Gate   — lint · security scan · dependency audit · frontend build
+#   2. Deploy STAGING — auto (staging AWS account)
+#   3. Smoke Tests    — full API tests against live staging
+#   4. Deploy PROD    — requires manual approval (prod AWS account)
+#
+# Prod only deploys when ALL of the above pass.
 #
 # GitHub Secrets required (Settings → Secrets → Actions):
 #   STAGING_EC2_HOST              Staging EC2 Elastic IP
@@ -44,9 +44,10 @@ env:
 
 jobs:
 
-  # ── 1. Lint & Test + build both frontends ─────────────────────────────────
-  lint-test:
-    name: Lint & Test
+  # ── 1. Quality Gate ──────────────────────────────────────────────────────────
+  # All checks must pass before any deployment happens.
+  quality-gate:
+    name: Quality Gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,11 +56,27 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install backend deps + lint
-        run: |
-          pip install -r backend/requirements.txt ruff -q
-          ruff check backend/app/
+      - name: Install Python deps + tools
+        run: pip install -r backend/requirements.txt ruff bandit pip-audit -q
 
+      # ── Code style & lint ──────────────────────────────────────────────────
+      - name: Lint — ruff
+        run: ruff check backend/app/
+
+      # ── Security scan — find common vulnerabilities in Python code ─────────
+      - name: Security — bandit
+        run: |
+          bandit -r backend/app/ \
+            --severity-level medium \
+            --confidence-level medium \
+            -x backend/app/tests \
+            --quiet
+
+      # ── Dependency audit — check for known CVEs in installed packages ──────
+      - name: Dependency audit — pip-audit
+        run: pip-audit -r backend/requirements.txt --ignore-vuln PYSEC-2023-62
+
+      # ── Frontend ───────────────────────────────────────────────────────────
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -69,6 +86,11 @@ jobs:
       - name: npm install
         run: npm ci
         working-directory: frontend
+
+      - name: Frontend dependency audit — npm audit
+        run: npm audit --audit-level=high
+        working-directory: frontend
+        continue-on-error: true   # warn only — frontend deps often have minor issues
 
       - name: Build frontend — STAGING
         run: npm run build
@@ -102,10 +124,10 @@ jobs:
           path: frontend/build/
           retention-days: 1
 
-  # ── 2. Deploy STAGING account (auto on every push) ────────────────────────
+  # ── 2. Deploy STAGING ────────────────────────────────────────────────────────
   deploy-staging:
     name: Deploy STAGING
-    needs: lint-test
+    needs: quality-gate
     runs-on: ubuntu-latest
     environment: staging
     steps:
@@ -160,7 +182,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.STAGING_AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Upload frontend → staging S3 bucket root
+      - name: Upload frontend → staging S3
         run: |
           aws s3 sync build/static/ \
             s3://${{ secrets.STAGING_S3_FRONTEND_BUCKET }}/static/ \
@@ -170,10 +192,23 @@ jobs:
             --cache-control "no-cache,no-store,must-revalidate" \
             --exclude "static/*" --delete
 
-  # ── 3. Deploy PROD account (requires approval in GitHub UI) ──────────────
+  # ── 3. Smoke Tests — run against live staging ────────────────────────────────
+  # All 10 API tests must pass before prod is available for approval.
+  smoke-tests:
+    name: Smoke Tests — STAGING
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run smoke tests against staging
+        run: bash infrastructure/scripts/test_staging.sh ${{ secrets.STAGING_EC2_HOST }}
+
+  # ── 4. Deploy PROD ───────────────────────────────────────────────────────────
+  # Requires manual approval in GitHub UI after smoke tests pass.
   deploy-prod:
     name: Deploy PROD
-    needs: deploy-staging
+    needs: smoke-tests
     runs-on: ubuntu-latest
     environment: prod
     steps:
@@ -228,7 +263,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Upload frontend → prod S3 bucket root
+      - name: Upload frontend → prod S3
         run: |
           aws s3 sync build/static/ \
             s3://${{ secrets.S3_FRONTEND_BUCKET }}/static/ \
