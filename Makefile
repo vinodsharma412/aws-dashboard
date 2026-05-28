@@ -117,6 +117,10 @@ test-staging:
 	@echo "→ Running staging smoke tests..."
 	@bash infrastructure/scripts/test_staging.sh $(EC2_HOST)
 
+test-prod:
+	@echo "→ Running prod smoke tests..."
+	@bash infrastructure/scripts/test_staging.sh $(EC2_HOST)
+
 # ── Infrastructure (one-time per account) ─────────────────────────────────────
 dynamo-tables:
 	@echo "→ Creating DynamoDB tables for STAGE=$(STAGE)"
