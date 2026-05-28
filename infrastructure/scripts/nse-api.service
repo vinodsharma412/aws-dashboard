@@ -43,7 +43,7 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 
 # Resource limits for t2.micro (1 GB RAM)
-MemoryLimit=700M
+MemoryMax=700M
 CPUQuota=90%
 
 StandardOutput=journal
