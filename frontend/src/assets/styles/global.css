@@ -600,6 +600,23 @@ img { max-width: 100%; }
 }
 
 /* =============================================================
+   PRODUCTION ENVIRONMENT BANNER
+   ============================================================= */
+.prod-banner {
+  background: #d32f2f;
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: center;
+  padding: 6px 16px;
+  position: sticky;
+  top: 0;
+  z-index: 300;
+  text-transform: uppercase;
+}
+
+/* =============================================================
    TOP PANEL
    ============================================================= */
 .top-panel {
