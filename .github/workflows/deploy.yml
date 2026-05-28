@@ -1,7 +1,7 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Two-account promotion pipeline:  STAGING account → PROD account
 #
-# Trigger:  push to `develop`
+# Trigger:  push to `main`  (merge develop → main to deploy)
 #
 # Each stage runs in its own AWS account with its own EC2, DynamoDB, S3, SQS.
 # No table prefixes needed — accounts are fully isolated.
@@ -36,7 +36,7 @@ name: Deploy Pipeline
 
 on:
   push:
-    branches: [ develop ]
+    branches: [ main ]
   workflow_dispatch:
 
 env:
