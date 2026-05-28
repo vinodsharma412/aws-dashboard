@@ -66,7 +66,7 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()) ->
     """
     token = login_user(form_data.username, form_data.password)
 
-    if settings.is_prod:
+    if settings.STAGE == "prod":
         client_ip = (
             request.headers.get("x-forwarded-for", "").split(",")[0].strip()
             or (request.client.host if request.client else "unknown")
