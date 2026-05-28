@@ -94,8 +94,8 @@ check "Stock analysis — RELIANCE.NS" \
 
 # ── 4. Global markets ────────────────────────────────────────────────────────
 check "Global markets (dashboard)" \
-    "curl -fsS ${AUTH} '${BASE}/stocks/global-markets'" \
-    '"nifty"'
+    "curl -fsS ${AUTH} '${BASE}/stocks/market/global'" \
+    '"symbol"'
 
 # ── 5. Screener ──────────────────────────────────────────────────────────────
 check "Screener endpoint" \
