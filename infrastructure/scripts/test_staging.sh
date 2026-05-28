@@ -20,7 +20,7 @@
 set -euo pipefail
 
 EC2_HOST="${1:?Usage: $0 <EC2_HOST>}"
-BASE="http://${EC2_HOST}/staging/api/v1"
+BASE="http://${EC2_HOST}/api/v1"
 PASS=0
 FAIL=0
 
