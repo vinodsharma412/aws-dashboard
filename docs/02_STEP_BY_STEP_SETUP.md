@@ -1,313 +1,532 @@
-# Step-by-Step AWS Setup Guide
+# Step-by-Step Setup Guide — Two AWS Accounts
 
-## PHASE 1 — AWS Account & IAM
+> One staging account, one prod account. Each has its own EC2, DynamoDB, S3, SQS, and SNS.
+> Follow these steps **twice** — once for staging, once for prod.
 
-### Step 1.1 — Create Free AWS Account
-1. Go to https://aws.amazon.com/free/
-2. Click "Create a Free Account"
-3. Enter email, password, account name
-4. Choose "Personal" account type
-5. Enter credit card (required but NOT charged for free tier)
-6. Choose "Basic Support" (free)
-7. Verify phone number
-8. Select region: **Asia Pacific (Mumbai) ap-south-1**
+---
 
-### Step 1.2 — Create IAM Admin User (never use root account)
-1. Login to AWS Console → search "IAM" → open IAM
-2. Click "Users" → "Create user"
-3. Username: `nse-admin`
-4. Check "Provide user access to the AWS Management Console"
-5. Select "I want to create an IAM user"
-6. Set password → Next
-7. Click "Attach policies directly"
-8. Search and attach: `AdministratorAccess`
-9. Click "Create user"
-10. **Download the CSV** (access key + secret) — you won't see it again
-11. Logout from root, login with `nse-admin`
+## Overview
 
-### Step 1.3 — Install AWS CLI on your machine
+```
+PART A — Do once (AWS Organization)
+  STEP 1   Create two AWS accounts (staging + prod)       (~15 min)
+
+PART B — Do for STAGING account, then repeat for PROD account
+  STEP 2   IAM user + AWS CLI                             (~10 min)
+  STEP 3   EC2 instance + Elastic IP                      (~10 min)
+  STEP 4   EC2 software setup                             (~15 min)
+  STEP 5   DynamoDB tables                                ( ~5 min)
+  STEP 6   SSM secrets                                    ( ~5 min)
+  STEP 7   SQS queues + SNS alerts                        ( ~5 min)
+  STEP 8   S3 buckets                                     ( ~5 min)
+
+PART C — Do once (GitHub)
+  STEP 9   GitHub secrets + environments + first deploy   (~10 min)
+  STEP 10  Create admin users                             ( ~5 min)
+```
+
+Total: ~2 hours (1 hour per account + 30 min GitHub setup).
+
+---
+
+## PART A — AWS Organization (one-time)
+
+### STEP 1 — Create Two AWS Accounts
+
+You need two accounts: one for staging, one for prod.
+
+**Option A — AWS Organizations (recommended, one billing)**
+
+1. Sign in to your existing AWS account (this becomes the management account)
+2. AWS Console → search **Organizations** → **Create organization**
+3. **Add an AWS account** → **Create an AWS account**
+   - Account name: `nse-staging`
+   - Email: use a `+` alias, e.g. `yourname+nse-staging@gmail.com`
+4. Repeat → **Create an AWS account**
+   - Account name: `nse-prod`
+   - Email: `yourname+nse-prod@gmail.com`
+5. Both accounts are ready in ~2 minutes each
+
+**Option B — Two separate AWS accounts**
+
+1. [aws.amazon.com/free](https://aws.amazon.com/free) → create account with `yourname+nse-staging@gmail.com`
+2. Repeat with `yourname+nse-prod@gmail.com`
+
+> Both accounts are free — t2.micro EC2 + DynamoDB stay within free tier.
+
+---
+
+## PART B — Repeat STEP 2–8 for each account
+
+> Do staging first, then repeat for prod.
+> Only difference: use `STAGE=staging` for staging, `STAGE=prod` for prod.
+
+---
+
+### STEP 2 — IAM User + AWS CLI
+
+#### 2.1 Sign in to the account
+
+- Organizations: AWS Console → top-right account menu → **Switch role** → select `nse-staging`
+- Separate account: sign in with that account's root email
+
+#### 2.2 Create an IAM admin user
+
+Never use root for daily work.
+
+1. AWS Console → **IAM** → **Users** → **Create user**
+2. Username: `nse-admin`
+3. Check **"Provide user access to the AWS Management Console"**
+4. Select **"I want to create an IAM user"** → set a password
+5. Attach policy: **AdministratorAccess**
+6. **Create user**
+
+Create access keys:
+1. IAM → Users → `nse-admin` → **Security credentials** → **Create access key**
+2. Use case: **Command Line Interface (CLI)**
+3. **Download CSV** — you cannot view the secret again
+
+#### 2.3 Configure AWS CLI profile
+
 ```bash
-# Ubuntu/Debian
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
-sudo ./aws/install
+# Staging account:
+aws configure --profile nse-staging
+# AWS Access Key ID:     paste from CSV
+# AWS Secret Access Key: paste from CSV
+# Default region:        ap-south-1
+# Default output:        json
 
 # Verify
-aws --version
+aws sts get-caller-identity --profile nse-staging
+# → should print the staging account ID
+
+# Prod account (after repeating these steps for prod):
+aws configure --profile nse-prod
+aws sts get-caller-identity --profile nse-prod
 ```
 
-### Step 1.4 — Configure AWS CLI
+> Activate a profile for a terminal session to avoid typing `--profile` every time:
+> ```bash
+> export AWS_PROFILE=nse-staging
+> export AWS_PROFILE=nse-prod    # to switch
+> ```
+
+---
+
+### STEP 3 — EC2 Instance
+
+#### 3.1 Launch EC2
+
+AWS Console → **EC2** → **Launch instance**
+
+| Setting | Value |
+|---------|-------|
+| Name | `nse-server` |
+| AMI | Ubuntu Server 22.04 LTS (Free tier eligible) |
+| Instance type | `t2.micro` (Free tier eligible) |
+| Key pair | Create new → Name: `nse-keypair`, RSA, .pem → **Download** |
+| Security group | New group: SSH port 22 from `0.0.0.0/0`, HTTP port 80 from `0.0.0.0/0` |
+| Storage | 20 GB gp3 |
+
+Click **Launch instance**.
+
+Save the key file:
 ```bash
-aws configure
-# AWS Access Key ID:     [paste from CSV]
-# AWS Secret Access Key: [paste from CSV]
-# Default region name:   ap-south-1
-# Default output format: json
+mv ~/Downloads/nse-keypair.pem ~/.ssh/nse-keypair-staging.pem   # for staging
+mv ~/Downloads/nse-keypair.pem ~/.ssh/nse-keypair-prod.pem      # for prod
+chmod 400 ~/.ssh/nse-keypair-staging.pem
+chmod 400 ~/.ssh/nse-keypair-prod.pem
+```
+
+#### 3.2 Assign Elastic IP (prevents IP change on restart)
+
+1. EC2 → **Elastic IPs** → **Allocate Elastic IP** → Allocate
+2. Select new IP → **Actions** → **Associate** → choose `nse-server` → Associate
+3. **Copy this IP** — needed for GitHub secrets
+
+#### 3.3 Verify SSH
+
+```bash
+ssh -i ~/.ssh/nse-keypair-staging.pem ubuntu@<ELASTIC-IP>
+# Should show Ubuntu prompt. Type exit when done.
 ```
 
 ---
 
-## PHASE 2 — DynamoDB Tables
+### STEP 4 — EC2 Software Setup
 
-### Step 2.1 — Run the table creation script
+#### 4.1 Copy setup files to EC2
+
+From your local machine (project root):
+
 ```bash
-cd /home/vinod/Documents/Vinod/aws
-python3 infrastructure/dynamodb/create_tables.py
+# Replace <IP> and key filename for each account
+scp -i ~/.ssh/nse-keypair-staging.pem \
+    infrastructure/scripts/ec2_setup.sh \
+    infrastructure/scripts/nginx.conf \
+    infrastructure/scripts/nse-api.service \
+    infrastructure/scripts/nse-worker.service \
+    ubuntu@<IP>:~/
 ```
 
-This creates all 6 tables. See `infrastructure/dynamodb/create_tables.py`.
+#### 4.2 Run the setup script on EC2
 
-### Step 2.2 — Verify in AWS Console
-1. Open AWS Console → DynamoDB → Tables
-2. You should see: `nse_users`, `nse_stock_transactions`, `nse_stock_watchlist`,
-   `nse_scraping_jobs`, `nse_scraping_tasks`, `nse_product_data`
-
----
-
-## PHASE 3 — S3 Buckets
-
-### Step 3.1 — Run the S3 setup script
 ```bash
-bash infrastructure/scripts/s3_setup.sh
-```
-
-This creates:
-- `nse-frontend-<your-account-id>` — static website hosting
-- `nse-assets-<your-account-id>` — avatar image storage
-
-### Step 3.2 — Note your S3 website URL
-After script runs, note the URL:
-```
-http://nse-frontend-<account-id>.s3-website.ap-south-1.amazonaws.com
-```
-
----
-
-## PHASE 4 — EC2 Instance
-
-### Step 4.1 — Launch EC2 t2.micro
-1. AWS Console → EC2 → "Launch Instance"
-2. **Name:** `nse-stock-server`
-3. **AMI:** Ubuntu Server 22.04 LTS (Free tier eligible)
-4. **Instance type:** t2.micro (Free tier eligible)
-5. **Key pair:** Click "Create new key pair"
-   - Name: `nse-keypair`
-   - Type: RSA
-   - Format: .pem
-   - **Download and save** `nse-keypair.pem` to `~/.ssh/`
-6. **Security Group:** Create new
-   - Allow SSH (port 22) from My IP
-   - Allow HTTP (port 80) from Anywhere
-   - Allow HTTPS (port 443) from Anywhere
-   - Allow Custom TCP port 9000 from Anywhere (FastAPI during dev)
-7. **Storage:** 8 GB gp2 (free tier: 30 GB max)
-8. Click "Launch Instance"
-9. Wait 2 minutes for it to start
-
-### Step 4.2 — Assign Elastic IP (so IP doesn't change on restart)
-1. EC2 → Elastic IPs → "Allocate Elastic IP address" → Allocate
-2. Select the new IP → Actions → "Associate Elastic IP"
-3. Choose your instance → Associate
-4. Note this IP — this is your server's permanent IP
-
-### Step 4.3 — SSH into EC2
-```bash
-chmod 400 ~/.ssh/nse-keypair.pem
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
-```
-
-### Step 4.4 — Run EC2 setup script
-```bash
-# Copy the setup script to EC2
-scp -i ~/.ssh/nse-keypair.pem \
-    /home/vinod/Documents/Vinod/aws/infrastructure/scripts/ec2_setup.sh \
-    ubuntu@<YOUR-ELASTIC-IP>:~/
-
-# SSH in and run it
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
+ssh -i ~/.ssh/nse-keypair-staging.pem ubuntu@<IP>
 bash ~/ec2_setup.sh
+# Takes ~10 minutes
+# Installs: Python 3.12, pip, Nginx, Playwright, AWS CLI v2
+# Creates: /opt/nse/ with venv, systemd services enabled
 ```
 
-This installs: Python 3.11, pip, virtualenv, Node.js 20, Nginx, Playwright, git.
+#### 4.3 Create the stage .env file on EC2
 
----
-
-## PHASE 5 — Deploy Backend to EC2
-
-### Step 5.1 — Copy backend code to EC2
 ```bash
-# From your local machine:
-scp -i ~/.ssh/nse-keypair.pem -r \
-    /home/vinod/Documents/Vinod/aws/backend/ \
-    ubuntu@<YOUR-ELASTIC-IP>:~/nse-backend/
-```
+# On the staging EC2:
+cat > /opt/nse/.env << 'EOF'
+STAGE=staging
+APP_ENV=staging
+DEBUG=false
+EOF
 
-### Step 5.2 — Create .env on EC2
-```bash
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<YOUR-ELASTIC-IP>
-cd ~/nse-backend
-nano .env
-```
-
-Paste (replace values):
-```env
-APP_NAME=NSE Stock Dashboard
+# On the prod EC2:
+cat > /opt/nse/.env << 'EOF'
+STAGE=prod
 APP_ENV=production
 DEBUG=false
-
-SECRET_KEY=your-very-long-random-secret-key-here
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
-
-# AWS
-AWS_REGION=ap-south-1
-S3_ASSETS_BUCKET=nse-assets-<your-account-id>
-
-# Optional
-GMAIL_USER=
-GMAIL_APP_PASSWORD=
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
+EOF
 ```
 
-### Step 5.3 — Install dependencies and run
-```bash
-cd ~/nse-backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-playwright install-deps chromium
+#### 4.4 Attach IAM role to EC2
 
-# Test run
-uvicorn app.main:app --host 0.0.0.0 --port 9000
+The EC2 needs permission to read DynamoDB, S3, and SSM without hardcoded keys.
+
+```bash
+# From local machine (activate correct profile first):
+export AWS_PROFILE=nse-staging
+bash infrastructure/iam/setup_ec2_role.sh
 ```
 
-Test from browser: `http://<YOUR-ELASTIC-IP>:9000/docs`
+Then in AWS Console:
+1. EC2 → select `nse-server` → **Actions** → **Security** → **Modify IAM role**
+2. Select `NSEStockDashboardEC2Role` → **Update IAM role**
 
-### Step 5.4 — Configure Nginx reverse proxy
+---
+
+### STEP 5 — DynamoDB Tables
+
 ```bash
-sudo nano /etc/nginx/sites-available/nse
+# Staging account (creates 13 tables with clean names: users, scraping_jobs, ...):
+AWS_PROFILE=nse-staging STAGE=staging python3 infrastructure/dynamodb/create_tables.py
+
+# Prod account (same table names, different account):
+AWS_PROFILE=nse-prod STAGE=prod python3 infrastructure/dynamodb/create_tables.py
 ```
 
-Paste the nginx config from `infrastructure/scripts/nginx.conf`, then:
-```bash
-sudo ln -s /etc/nginx/sites-available/nse /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
+Verify in AWS Console → **DynamoDB** → **Tables** — you should see 13 tables:
+
+```
+users                 scraping_jobs         menus
+stock_transactions    scraping_tasks        menu_access
+stock_watchlist       product_data          email_messages
+screener_cache        product_master        email_sync_state
+                      word_suggestions
 ```
 
-### Step 5.5 — Set up systemd services
+No prefixes — accounts are isolated so both have identical clean names.
+
+---
+
+### STEP 6 — SSM Secrets
+
 ```bash
-sudo cp ~/infrastructure/scripts/nse-api.service /etc/systemd/system/
-sudo cp ~/infrastructure/scripts/nse-worker.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable nse-api nse-worker
-sudo systemctl start nse-api nse-worker
-sudo systemctl status nse-api
+# Staging account:
+export AWS_PROFILE=nse-staging
+bash infrastructure/ssm/setup_ssm.sh staging
+
+# Prod account:
+export AWS_PROFILE=nse-prod
+bash infrastructure/ssm/setup_ssm.sh prod
+```
+
+**What to enter at each prompt:**
+
+| Prompt | Value |
+|--------|-------|
+| JWT secret | Press **Enter** to auto-generate |
+| Gmail user | Your Gmail address (for alert emails) |
+| Gmail app password | Gmail → Security → App passwords → generate one |
+| SQS queue URL | Press **Enter** for now — fill in after STEP 7 |
+| SNS alerts ARN | Press **Enter** for now — fill in after STEP 7 |
+| S3 assets bucket | Press **Enter** for now — fill in after STEP 8 |
+| Service account password | Any password (used by Lambda) |
+
+---
+
+### STEP 7 — SQS Queues + SNS Alerts
+
+```bash
+# Staging account:
+export AWS_PROFILE=nse-staging
+bash infrastructure/sqs/setup_sqs.sh staging
+bash infrastructure/sns/setup_sns.sh staging your@email.com
+
+# Prod account:
+export AWS_PROFILE=nse-prod
+bash infrastructure/sqs/setup_sqs.sh prod
+bash infrastructure/sns/setup_sns.sh prod your@email.com
+```
+
+**What gets created:**
+
+| Account | SQS main queue | SQS dead-letter queue | SNS topic |
+|---------|---------------|----------------------|-----------|
+| Staging | `nse-scraping-jobs-staging` | `nse-scraping-jobs-staging-dlq` | `nse-alerts-staging` |
+| Prod | `nse-scraping-jobs` | `nse-scraping-jobs-dlq` | `nse-alerts` |
+
+> Check email and click **Confirm subscription** for both SNS topics. Alerts won't arrive until confirmed.
+
+Now update SSM with SQS URL and SNS ARN (the scripts printed them):
+
+```bash
+# Re-run SSM setup — enter SQS URL and SNS ARN when prompted,
+# press Enter to keep all other values unchanged
+
+export AWS_PROFILE=nse-staging
+bash infrastructure/ssm/setup_ssm.sh staging
+
+export AWS_PROFILE=nse-prod
+bash infrastructure/ssm/setup_ssm.sh prod
 ```
 
 ---
 
-## PHASE 6 — Deploy Frontend to S3
+### STEP 8 — S3 Buckets
 
-### Step 6.1 — Update API URL
-Edit `frontend/src/utils/constants.js`:
-```javascript
-export const API_URL = 'http://<YOUR-ELASTIC-IP>/api/v1';
-```
-
-### Step 6.2 — Build React app
 ```bash
-cd /home/vinod/Documents/Vinod/aws/frontend
-npm install
-npm run build
+# Staging account:
+export AWS_PROFILE=nse-staging
+bash infrastructure/scripts/s3_setup.sh
+# Creates: nse-frontend-<staging-account-id>
+#          nse-assets-<staging-account-id>
+
+# Prod account:
+export AWS_PROFILE=nse-prod
+bash infrastructure/scripts/s3_setup.sh
+# Creates: nse-frontend-<prod-account-id>
+#          nse-assets-<prod-account-id>
 ```
 
-### Step 6.3 — Upload to S3
+Note both `nse-assets-*` bucket names, then update SSM:
+
 ```bash
-aws s3 sync build/ s3://nse-frontend-<account-id>/ --delete
-```
+export AWS_PROFILE=nse-staging
+bash infrastructure/ssm/setup_ssm.sh staging
+# At "S3 assets bucket": enter  nse-assets-<staging-account-id>
+# Press Enter for all others
 
-### Step 6.4 — Access the app
-Open: `http://nse-frontend-<account-id>.s3-website.ap-south-1.amazonaws.com`
+export AWS_PROFILE=nse-prod
+bash infrastructure/ssm/setup_ssm.sh prod
+# At "S3 assets bucket": enter  nse-assets-<prod-account-id>
+```
 
 ---
 
-## PHASE 7 — VS Code Remote Development
+## PART C — GitHub (one-time)
 
-### Step 7.1 — Install Remote-SSH extension
-1. VS Code → Extensions → search "Remote - SSH"
-2. Install "Remote - SSH" by Microsoft
+### STEP 9 — GitHub Secrets + Pipeline
 
-### Step 7.2 — Add SSH host
-Press `Ctrl+Shift+P` → "Remote-SSH: Open SSH Configuration File"
-Add:
+#### 9.1 Add secrets
+
+GitHub repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+
+Add all 14 secrets:
+
+**Staging (7 secrets):**
+
+| Secret | Value |
+|--------|-------|
+| `STAGING_EC2_HOST` | Staging EC2 Elastic IP |
+| `STAGING_EC2_SSH_KEY` | Full contents of `~/.ssh/nse-keypair-staging.pem` |
+| `STAGING_AWS_ACCESS_KEY_ID` | Staging IAM access key (from CSV) |
+| `STAGING_AWS_SECRET_ACCESS_KEY` | Staging IAM secret key (from CSV) |
+| `STAGING_S3_FRONTEND_BUCKET` | `nse-frontend-<staging-account-id>` |
+| `STAGING_API_URL` | `http://<STAGING_EC2_HOST>/api/v1` |
+| `STAGING_SSE_URL` | `http://<STAGING_EC2_HOST>` |
+
+**Prod (7 secrets):**
+
+| Secret | Value |
+|--------|-------|
+| `EC2_HOST` | Prod EC2 Elastic IP |
+| `EC2_SSH_KEY` | Full contents of `~/.ssh/nse-keypair-prod.pem` |
+| `AWS_ACCESS_KEY_ID` | Prod IAM access key (from CSV) |
+| `AWS_SECRET_ACCESS_KEY` | Prod IAM secret key (from CSV) |
+| `S3_FRONTEND_BUCKET` | `nse-frontend-<prod-account-id>` |
+| `PROD_API_URL` | `http://<EC2_HOST>/api/v1` |
+| `PROD_SSE_URL` | `http://<EC2_HOST>` |
+
+> **How to copy the SSH key correctly:**
+> ```bash
+> cat ~/.ssh/nse-keypair-staging.pem
+> # Select ALL output including:
+> #   -----BEGIN RSA PRIVATE KEY-----
+> #   ... lines ...
+> #   -----END RSA PRIVATE KEY-----
+> # Paste the entire thing into the GitHub secret value
+> ```
+
+#### 9.2 Create GitHub Environments
+
+GitHub repo → **Settings** → **Environments**
+
+1. **New environment** → name: `staging` → no protection rules → Save
+2. **New environment** → name: `prod` → **Required reviewers** → add your GitHub username → **Save protection rules**
+
+#### 9.3 Trigger first deployment
+
+```bash
+git push origin develop
 ```
-Host nse-aws
-    HostName <YOUR-ELASTIC-IP>
-    User ubuntu
-    IdentityFile ~/.ssh/nse-keypair.pem
+
+GitHub → **Actions** → watch **Deploy Pipeline** run.
+
+**Expected flow:**
+
+```
+Step 1  Lint & Test      ~3 min   ruff check + build staging frontend + build prod frontend
+Step 2  Deploy STAGING   ~3 min   rsync to staging EC2, restart services, health check, S3 upload
+Step 3  Waiting          ---      GitHub emails you: "Deployment review required"
+Step 4  You approve:     GitHub → Actions → latest run → "Review deployments" → tick prod → Approve
+Step 5  Deploy PROD      ~3 min   rsync to prod EC2, restart services, health check, S3 upload
 ```
 
-### Step 7.3 — Connect
-Press `Ctrl+Shift+P` → "Remote-SSH: Connect to Host" → `nse-aws`
-
-VS Code opens connected to EC2. You can edit files directly on the server.
+**If any step fails** — all later steps are skipped. Check the failing step's logs in GitHub Actions.
 
 ---
 
-## PHASE 8 — Create First Admin User
+### STEP 10 — Create Admin Users
+
+After first successful deployment, SSH into each EC2 and create the admin user.
 
 ```bash
-# SSH into EC2, then:
-cd ~/nse-backend
-source venv/bin/activate
-python3 -c "
+# ── STAGING admin ──────────────────────────────────────────────
+ssh -i ~/.ssh/nse-keypair-staging.pem ubuntu@<STAGING-IP>
+
+cd /opt/nse/backend
+/opt/nse/venv/bin/python3 - << 'EOF'
+import os; os.environ["STAGE"] = "staging"
 from app.db.dynamo import dynamo_users
 from app.core.security import hash_password
-import uuid
+import uuid, datetime
 dynamo_users.put_item(Item={
-    'user_id': str(uuid.uuid4()),
-    'username': 'admin',
-    'email': 'admin@example.com',
-    'full_name': 'Admin User',
-    'role': 'admin',
-    'hashed_password': hash_password('changeme123'),
-    'is_active': True,
-    'avatar_url': None,
+    "user_id": str(uuid.uuid4()),
+    "username": "admin",
+    "email": "admin@example.com",
+    "full_name": "Admin User",
+    "role": "admin",
+    "hashed_password": hash_password("changeme123"),
+    "is_active": True,
+    "created_at": datetime.datetime.utcnow().isoformat(),
 })
-print('Admin user created')
-"
+print("Staging admin created")
+EOF
+exit
+
+# ── PROD admin ─────────────────────────────────────────────────
+ssh -i ~/.ssh/nse-keypair-prod.pem ubuntu@<PROD-IP>
+
+cd /opt/nse/backend
+/opt/nse/venv/bin/python3 - << 'EOF'
+import os; os.environ["STAGE"] = "prod"
+from app.db.dynamo import dynamo_users
+from app.core.security import hash_password
+import uuid, datetime
+dynamo_users.put_item(Item={
+    "user_id": str(uuid.uuid4()),
+    "username": "admin",
+    "email": "admin@example.com",
+    "full_name": "Admin User",
+    "role": "admin",
+    "hashed_password": hash_password("changeme123"),
+    "is_active": True,
+    "created_at": datetime.datetime.utcnow().isoformat(),
+})
+print("Prod admin created")
+EOF
+exit
 ```
 
-Login at the frontend URL with `admin` / `changeme123`.
+**Change the default password immediately** after first login (Settings page).
 
 ---
 
-## Useful Commands
+## Verify Everything Works
 
 ```bash
-# Check API logs
-sudo journalctl -u nse-api -f
+# Health checks
+curl http://<STAGING-IP>/api/v1/health/   # → {"status":"ok","stage":"staging"}
+curl http://<PROD-IP>/api/v1/health/      # → {"status":"ok","stage":"prod"}
 
-# Check worker logs
-sudo journalctl -u nse-worker -f
+# Frontend URLs
+# Staging: http://nse-frontend-<staging-id>.s3-website.ap-south-1.amazonaws.com
+# Prod:    http://nse-frontend-<prod-id>.s3-website.ap-south-1.amazonaws.com
 
-# Restart API after code change
-sudo systemctl restart nse-api
+# Automated smoke tests
+make test-staging EC2_HOST=<STAGING-IP>
+```
 
-# Re-deploy frontend
-cd /home/vinod/Documents/Vinod/aws/frontend
-npm run build
-aws s3 sync build/ s3://nse-frontend-<account-id>/ --delete
+---
 
-# SSH shortcut (after VS Code SSH config)
-ssh nse-aws
+## What Each Account Contains (Summary)
 
-# Check EC2 costs (always free tier check)
-aws ce get-cost-and-usage \
-  --time-period Start=2025-01-01,End=2025-02-01 \
-  --granularity MONTHLY \
-  --metrics "BlendedCost"
+```
+nse-staging account                    nse-prod account
+───────────────────────────────────    ──────────────────────────────────
+EC2  t2.micro  Ubuntu 22.04            EC2  t2.micro  Ubuntu 22.04
+  /opt/nse/.env  →  STAGE=staging        /opt/nse/.env  →  STAGE=prod
+  FastAPI port 9000                      FastAPI port 9000
+  Nginx  /api/ → :9000                   Nginx  /api/ → :9000
+
+DynamoDB  (13 tables, no prefix)       DynamoDB  (13 tables, no prefix)
+  users, stock_transactions, ...         users, stock_transactions, ...
+
+SQS                                    SQS
+  nse-scraping-jobs-staging              nse-scraping-jobs
+  nse-scraping-jobs-staging-dlq          nse-scraping-jobs-dlq
+
+SNS                                    SNS
+  nse-alerts-staging                     nse-alerts
+
+SSM Parameter Store                    SSM Parameter Store
+  /nse/staging/jwt-secret                /nse/prod/jwt-secret
+  /nse/staging/sqs-jobs-url              /nse/prod/sqs-jobs-url
+  /nse/staging/...                       /nse/prod/...
+
+S3                                     S3
+  nse-frontend-<staging-id>/             nse-frontend-<prod-id>/
+  nse-assets-<staging-id>/               nse-assets-<prod-id>/
+```
+
+---
+
+## Ongoing Operations
+
+```bash
+# Tail logs
+make logs EC2_HOST=<STAGING-IP>          # staging API logs
+make logs EC2_HOST=<PROD-IP>             # prod API logs
+make logs-worker EC2_HOST=<STAGING-IP>   # staging worker logs
+
+# Restart services
+make restart EC2_HOST=<STAGING-IP>
+make restart EC2_HOST=<PROD-IP>
+
+# Manual deploy (without CI/CD)
+make deploy EC2_HOST=<STAGING-IP>
+make deploy EC2_HOST=<PROD-IP>
+
+# Health check
+make health EC2_HOST=<STAGING-IP>
+make health EC2_HOST=<PROD-IP>
 ```

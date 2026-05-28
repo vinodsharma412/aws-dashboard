@@ -3,6 +3,8 @@ import { Outlet } from 'react-router-dom';
 import Sidebar  from './Sidebar';
 import TopPanel from './TopPanel';
 
+const IS_PROD = process.env.REACT_APP_STAGE === 'prod';
+
 function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -19,6 +21,11 @@ function Layout() {
       )}
 
       <div className="main-area">
+        {IS_PROD && (
+          <div className="prod-banner" role="alert">
+            ⚠ LIVE — PRODUCTION &nbsp;·&nbsp; Changes affect real data
+          </div>
+        )}
         <TopPanel onToggleSidebar={toggleSidebar} />
         <div className="content">
           <Outlet />

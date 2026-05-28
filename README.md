@@ -107,41 +107,49 @@ Audit:
 
 ---
 
-## Three-Stage Deployment
+## Two-Stage Deployment
 
-Same codebase, three isolated environments in the **same AWS account**.
+Same codebase, two stages on **one EC2 instance** in **one AWS account**. Developers work locally; staging is the shared cloud test environment before production.
 
-| Stage | Git branch | DynamoDB tables | SSM path | Deploy |
-|-------|-----------|-----------------|----------|--------|
-| `dev` | `develop` | `dev_users`, `dev_menus`… | `/nse/dev/` | Auto on push |
-| `qc` | `release/**` | `qc_users`, `qc_menus`… | `/nse/qc/` | Auto on push |
-| `prod` | `main` | `users`, `menus`… | `/nse/prod/` | Manual approval |
+| Stage | Directory | Port | DynamoDB prefix | SSM path | SQS queue |
+|-------|-----------|------|-----------------|----------|-----------|
+| `staging` | `/opt/nse-staging` | 9001 | `stg_` | `/nse/staging/` | `nse-scraping-jobs-staging` |
+| `prod`    | `/opt/nse`         | 9000 | _(none)_ | `/nse/prod/`   | `nse-scraping-jobs` |
 
-### Git workflow
+### CI/CD pipeline (triggered by `git push origin develop`)
+
 ```
-feature/xyz ─┐
-             ├──→  develop  ──→  release/1.2.0  ──→  main
-             │        ↓               ↓               ↓
-             │       DEV             QC             PROD
-             │   (auto-deploy)   (auto-deploy)  (+approval gate)
+push to develop
+      │
+      ▼
+ Lint & Test ── ruff + build staging & prod frontends ──FAIL──► stop
+      │
+      ▼
+ Deploy STAGING ── rsync → pip → restart → health check ──FAIL──► stop
+      │            frontend → S3 /staging/
+      ▼
+ ⏳ Waiting for approval  (email sent to reviewer)
+      │  Approve: GitHub → Actions → Review deployments → prod
+      ▼
+ Deploy PROD ── same process → /opt/nse/ → port 9000
+               frontend → S3 root → CloudFront invalidation
 ```
 
 ### How stage isolation works
 
-The `STAGE` environment variable controls everything:
+The `STAGE` environment variable controls DynamoDB table names, SQS queue, SNS topic, and SSM paths. Staging tables are prefixed `stg_` so they can never overlap with production data.
 
 ```python
 # app/config.py
 @property
 def table_prefix(self) -> str:
-    return "" if self.STAGE == "prod" else f"{self.STAGE}_"
+    return "" if self.STAGE == "prod" else "stg_"
 
 # app/db/dynamo.py
-dynamo_users = _table("users")   # → "users" in prod, "dev_users" in dev
+dynamo_users = _table("users")
+# → "users"     in prod
+# → "stg_users" in staging
 ```
-
-All SQS queues, SSM parameters, Lambda functions, and CloudWatch alarms also
-include the stage name, so environments never interfere.
 
 ---
 
@@ -269,35 +277,34 @@ bash infrastructure/sns/setup_sns.sh prod your@email.com
 
 ### Setup GitHub Secrets
 
-**Settings → Secrets and variables → Actions:**
+**Settings → Secrets and variables → Actions → New repository secret:**
 
 | Secret | Value |
 |--------|-------|
-| `EC2_HOST` | `YOUR_EC2_PUBLIC_IP` |
-| `EC2_SSH_KEY` | Contents of `~/.ssh/nse-key.pem` |
+| `EC2_HOST` | EC2 public IP (Elastic IP) |
+| `EC2_SSH_KEY` | Full contents of your `.pem` key file |
 | `AWS_ACCESS_KEY_ID` | IAM access key |
 | `AWS_SECRET_ACCESS_KEY` | IAM secret key |
-| `S3_FRONTEND_BUCKET` | `nse-frontend-YOUR_AWS_ACCOUNT_ID` |
-| `DEV_API_URL` | `http://YOUR_EC2_PUBLIC_IP/api/v1` |
-| `DEV_SSE_URL` | `http://YOUR_EC2_PUBLIC_IP` |
-| `PROD_API_URL` | `https://YOUR_API_GW_ID.execute-api.ap-south-1.amazonaws.com/prod/api/v1` |
-| `PROD_SSE_URL` | `http://YOUR_EC2_PUBLIC_IP` |
+| `S3_FRONTEND_BUCKET` | `nse-frontend-<your-account-id>` |
+| `STAGING_API_URL` | `http://<EC2_HOST>/staging/api/v1` |
+| `STAGING_SSE_URL` | `http://<EC2_HOST>` |
+| `PROD_API_URL` | `http://<EC2_HOST>/api/v1` |
+| `PROD_SSE_URL` | `http://<EC2_HOST>` |
 
-### Setup approval gate for prod
+**9 secrets total** — same single account, same EC2.
 
-**Settings → Environments → New environment → "prod" → Required reviewers: (add yourself)**
+### Setup GitHub Environments
+
+1. **Settings → Environments** → create `staging` (no protection) and `prod`
+2. On `prod` → **Required reviewers** → add your GitHub username → Save
 
 ### Deploy by pushing
 
 ```bash
-# Deploy to DEV automatically
-git checkout develop && git push origin develop
-
-# Deploy to QC automatically
-git checkout -b release/1.2.0 && git push origin release/1.2.0
-
-# Deploy to PROD (waits for your approval in GitHub)
-git checkout main && git merge release/1.2.0 && git push origin main
+git add .
+git commit -m "feat: your change"
+git push origin develop
+# Pipeline: Lint → STAGING (auto) → (approval) → PROD
 ```
 
 ---

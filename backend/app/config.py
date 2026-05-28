@@ -1,32 +1,31 @@
-"""Application configuration — multi-stage AWS edition.
+"""Application configuration — two-account AWS edition.
 
-Stage-aware configuration that supports three deployment environments:
-``dev``, ``qc``, and ``prod``.  Each stage gets its own:
+Two deployment stages, each in its own AWS account:
+  ``staging`` — separate AWS account, auto-deploys on every push.
+                Developers also use this stage locally.
+  ``prod``    — separate AWS account, requires manual approval before deploy.
 
-- DynamoDB table prefix  (empty for prod; ``dev_`` / ``qc_`` otherwise)
-- SQS queue names        (``nse-scraping-jobs-{stage}``)
-- SSM parameter paths    (``/nse/{stage}/…``)
+Each account has its own isolated:
+  - DynamoDB tables        (identical names — no prefix needed, separate accounts)
+  - SQS queue              (``nse-scraping-jobs`` in both accounts)
+  - SSM parameter paths    (``/nse/staging/`` / ``/nse/prod/``)
+  - SNS alert topic        (``nse-alerts`` in both accounts)
+  - S3 buckets             (separate bucket per account)
 
-Secrets are stored in **AWS SSM Parameter Store** (SecureString — free tier)
-and loaded at startup.  For local development the same values can be placed
-in ``backend/.env`` and the SSM fetch is skipped automatically.
+Secrets are loaded from SSM Parameter Store at startup (free tier, SecureString).
+For local development the same values can be placed in ``backend/.env`` and the
+SSM fetch is skipped automatically.
 
-Free-tier note
---------------
-SSM Parameter Store SecureString uses the AWS-managed KMS key at no extra
-charge — unlike Secrets Manager ($0.40/secret/month).  This keeps the entire
-stack within the AWS Free Tier for exploration and development.
-
-Environment variables (can override any setting):
-    STAGE                  dev | qc | prod  (default: dev)
-    SECRET_KEY             JWT signing key (loaded from SSM when empty)
-    AWS_REGION             ap-south-1 (default)
+Environment variables:
+    STAGE                  staging | prod  (default: staging)
+    SECRET_KEY             JWT signing key  (loaded from SSM when empty)
+    AWS_REGION             ap-south-1
     S3_ASSETS_BUCKET       nse-assets-<account-id>
-    SQS_SCRAPING_JOBS_URL  full SQS queue URL (loaded from SSM when empty)
-    SNS_ALERTS_ARN         arn:aws:sns:…    (loaded from SSM when empty)
-    COMPREHEND_ENABLED     true | false     (default: true)
-    GMAIL_USER             SMTP sender      (loaded from SSM when empty)
-    GMAIL_APP_PASSWORD     SMTP password    (loaded from SSM when empty)
+    SQS_SCRAPING_JOBS_URL  full SQS queue URL  (loaded from SSM when empty)
+    SNS_ALERTS_ARN         arn:aws:sns:…       (loaded from SSM when empty)
+    COMPREHEND_ENABLED     true | false  (default: true)
+    GMAIL_USER             SMTP sender   (loaded from SSM when empty)
+    GMAIL_APP_PASSWORD     SMTP password (loaded from SSM when empty)
 """
 
 import logging
@@ -82,9 +81,9 @@ class Settings(BaseSettings):
     """
 
     # ── Deployment stage ──────────────────────────────────────────────────────
-    STAGE: str = "dev"
+    STAGE: str = "staging"
     """Deployment stage.  Controls DynamoDB table prefix, SQS queue names,
-    and SSM parameter paths.  Valid values: ``dev``, ``qc``, ``prod``."""
+    and SSM parameter paths.  Valid values: ``staging``, ``prod``."""
 
     APP_NAME: str = "NSE Stock Dashboard"
     APP_ENV: str = "development"
@@ -126,24 +125,23 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
     # ── Derived properties (no extra env vars needed) ─────────────────────────
 
     @property
     def table_prefix(self) -> str:
-        """DynamoDB table name prefix for the current stage.
+        """DynamoDB table name prefix.
 
-        ``prod`` uses tables as-is (backward-compatible).
-        Lower environments prefix all table names so they never touch
-        production data even when pointing at the same AWS account.
+        Each stage runs in its own AWS account so table names are identical
+        in both accounts — no prefix is needed for isolation.
 
         Examples::
 
-            prod → ""       →  table name: "users"
-            qc   → "qc_"   →  table name: "qc_users"
-            dev  → "dev_"  →  table name: "dev_users"
+            staging → ""  → table name: "users"  (in staging account)
+            prod    → ""  → table name: "users"  (in prod account)
         """
-        return "" if self.STAGE == "prod" else f"{self.STAGE}_"
+        return ""
 
     @property
     def is_production(self) -> bool:

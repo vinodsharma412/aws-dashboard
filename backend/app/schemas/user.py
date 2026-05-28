@@ -4,7 +4,6 @@ Note: In the AWS version the primary key is ``user_id`` (UUID string),
 not an integer ``id``. ``UserResponse`` reflects the DynamoDB item structure.
 """
 
-from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel

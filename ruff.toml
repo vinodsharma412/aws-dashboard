@@ -1,0 +1,9 @@
+[lint]
+select = ["E", "W", "F"]
+ignore = [
+    "E501",  # line too long
+    "E701",  # multiple statements on one line (colon)  — used in compact score logic
+    "E702",  # multiple statements on one line (semicolon) — score += n; reasons.append(...)
+    "E731",  # lambda assignment — _nan helper in stock_service
+    "F841",  # local variable assigned but never used — fib786 placeholder
+]

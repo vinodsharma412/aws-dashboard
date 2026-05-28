@@ -1,4 +1,7 @@
-# systemd service — Playwright scraping worker (PRODUCTION)
+# systemd service — Playwright scraping worker
+#
+# This file is identical on every EC2 instance (dev, qc, prod).
+# STAGE is read from /opt/nse/.env — same as nse-api.service.
 #
 # Install:
 #   sudo cp infrastructure/scripts/nse-worker.service /etc/systemd/system/
@@ -10,7 +13,7 @@
 # Reload: sudo systemctl restart nse-worker
 
 [Unit]
-Description=NSE Stock Dashboard — Playwright Scraping Worker (prod)
+Description=NSE Stock Dashboard — Playwright Worker (prod)
 After=network.target nse-api.service
 Wants=network.target
 
@@ -21,7 +24,7 @@ Group=ubuntu
 WorkingDirectory=/opt/nse/backend
 Environment=PATH=/opt/nse/venv/bin:/usr/bin:/bin
 Environment=PLAYWRIGHT_BROWSERS_PATH=/home/ubuntu/.cache/ms-playwright
-Environment=STAGE=prod
+EnvironmentFile=-/opt/nse/.env
 EnvironmentFile=-/opt/nse/backend/.env
 
 ExecStart=/opt/nse/venv/bin/python -m app.worker
@@ -31,7 +34,7 @@ RestartSec=10
 StartLimitIntervalSec=120
 StartLimitBurst=5
 
-MemoryLimit=500M
+MemoryMax=500M
 CPUQuota=70%
 
 StandardOutput=journal

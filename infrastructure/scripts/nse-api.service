@@ -1,4 +1,10 @@
-# systemd service — FastAPI uvicorn server (PRODUCTION)
+# systemd service — FastAPI uvicorn server
+#
+# This file is identical on every EC2 instance (dev, qc, prod).
+# The STAGE value is read from /opt/nse/.env — set it there:
+#   STAGE=dev   on the dev EC2
+#   STAGE=qc    on the qc EC2
+#   STAGE=prod  on the prod EC2
 #
 # Install:
 #   sudo cp infrastructure/scripts/nse-api.service /etc/systemd/system/
@@ -20,7 +26,7 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/opt/nse/backend
 Environment=PATH=/opt/nse/venv/bin:/usr/bin:/bin
-Environment=STAGE=prod
+EnvironmentFile=-/opt/nse/.env
 EnvironmentFile=-/opt/nse/backend/.env
 
 ExecStart=/opt/nse/venv/bin/uvicorn \
@@ -37,7 +43,7 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 
 # Resource limits for t2.micro (1 GB RAM)
-MemoryLimit=700M
+MemoryMax=700M
 CPUQuota=90%
 
 StandardOutput=journal

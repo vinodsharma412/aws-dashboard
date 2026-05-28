@@ -52,11 +52,7 @@ echo "[1/3] Creating DLQ: ${DLQ_NAME}"
 
 DLQ_URL=$(aws sqs create-queue \
   --queue-name "${DLQ_NAME}" \
-  --attributes '{
-    "MessageRetentionPeriod": "1209600",
-    "VisibilityTimeout": "300",
-    "Tags": {"Stage": "'"${STAGE}"'", "Project": "nse-dashboard", "Purpose": "scraping-dlq"}
-  }' \
+  --attributes '{"MessageRetentionPeriod":"1209600","VisibilityTimeout":"300"}' \
   --region "${REGION}" \
   --query "QueueUrl" --output text 2>/dev/null || \
   aws sqs get-queue-url --queue-name "${DLQ_NAME}" --region "${REGION}" --query "QueueUrl" --output text)
@@ -78,13 +74,7 @@ echo "      Max receive count:  3 (after 3 failures → DLQ)"
 
 MAIN_URL=$(aws sqs create-queue \
   --queue-name "${MAIN_QUEUE}" \
-  --attributes '{
-    "VisibilityTimeout": "300",
-    "MessageRetentionPeriod": "345600",
-    "ReceiveMessageWaitTimeSeconds": "20",
-    "RedrivePolicy": "{\"deadLetterTargetArn\":\"'"${DLQ_ARN}"'\",\"maxReceiveCount\":\"3\"}",
-    "Tags": {"Stage": "'"${STAGE}"'", "Project": "nse-dashboard", "Purpose": "scraping-jobs"}
-  }' \
+  --attributes '{"VisibilityTimeout":"300","MessageRetentionPeriod":"345600","ReceiveMessageWaitTimeSeconds":"20","RedrivePolicy":"{\"deadLetterTargetArn\":\"'"${DLQ_ARN}"'\",\"maxReceiveCount\":\"3\"}"}' \
   --region "${REGION}" \
   --query "QueueUrl" --output text 2>/dev/null || \
   aws sqs get-queue-url --queue-name "${MAIN_QUEUE}" --region "${REGION}" --query "QueueUrl" --output text)
