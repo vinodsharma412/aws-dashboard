@@ -23,6 +23,7 @@ PART B — Do for STAGING account, then repeat for PROD account
 PART C — Do once (GitHub)
   STEP 9   GitHub secrets + environments + first deploy   (~10 min)
   STEP 10  Create admin users                             ( ~5 min)
+  STEP 11  Smoke tests                                    ( ~5 min)
 ```
 
 Total: ~2 hours (1 hour per account + 30 min GitHub setup).
@@ -385,8 +386,17 @@ GitHub repo → **Settings** → **Environments**
 
 #### 9.3 Trigger first deployment
 
+The project uses two separate workflow files:
+
+- **ci.yml** — triggers on `develop` push or PR to `main`. Runs lint (ruff), bandit security scan, pip-audit dependency audit, npm audit, and frontend build check. **No deployment.**
+- **deploy.yml** — triggers on `main` push only. Runs the full quality gate, then deploys staging → smoke tests → deploys prod (with manual approval).
+
+To trigger the first full deployment, merge develop into main:
+
 ```bash
-git push origin develop
+git checkout main
+git merge develop
+git push origin main
 ```
 
 GitHub → **Actions** → watch **Deploy Pipeline** run.
@@ -394,14 +404,17 @@ GitHub → **Actions** → watch **Deploy Pipeline** run.
 **Expected flow:**
 
 ```
-Step 1  Lint & Test      ~3 min   ruff check + build staging frontend + build prod frontend
+Step 1  Quality Gate     ~5 min   ruff + bandit + pip-audit + npm audit + frontend build check
 Step 2  Deploy STAGING   ~3 min   rsync to staging EC2, restart services, health check, S3 upload
-Step 3  Waiting          ---      GitHub emails you: "Deployment review required"
-Step 4  You approve:     GitHub → Actions → latest run → "Review deployments" → tick prod → Approve
-Step 5  Deploy PROD      ~3 min   rsync to prod EC2, restart services, health check, S3 upload
+Step 3  Smoke Tests      ~2 min   10 API tests via test_staging.sh (all must pass)
+Step 4  Waiting          ---      GitHub emails you: "Deployment review required"
+Step 5  You approve:     GitHub → Actions → latest run → "Review deployments" → tick prod → Approve
+Step 6  Deploy PROD      ~3 min   rsync to prod EC2, restart services, health check, S3 upload
 ```
 
 **If any step fails** — all later steps are skipped. Check the failing step's logs in GitHub Actions.
+
+For daily development work, push to `develop`. This triggers **ci.yml** only (lint + build checks, no deployment). Merge to `main` when ready to deploy.
 
 ---
 
@@ -414,46 +427,22 @@ After first successful deployment, SSH into each EC2 and create the admin user.
 ssh -i ~/.ssh/nse-keypair-staging.pem ubuntu@<STAGING-IP>
 
 cd /opt/nse/backend
-/opt/nse/venv/bin/python3 - << 'EOF'
-import os; os.environ["STAGE"] = "staging"
-from app.db.dynamo import dynamo_users
-from app.core.security import hash_password
-import uuid, datetime
-dynamo_users.put_item(Item={
-    "user_id": str(uuid.uuid4()),
-    "username": "admin",
-    "email": "admin@example.com",
-    "full_name": "Admin User",
-    "role": "admin",
-    "hashed_password": hash_password("changeme123"),
-    "is_active": True,
-    "created_at": datetime.datetime.utcnow().isoformat(),
-})
-print("Staging admin created")
-EOF
+/opt/nse/venv/bin/python3 -c "
+from app.crud.user_dynamo import create
+user = create(username='admin', email='admin@example.com', full_name='Admin', role='admin', password='YOUR_PASSWORD')
+print('Created:', user['user_id'])
+"
 exit
 
 # ── PROD admin ─────────────────────────────────────────────────
 ssh -i ~/.ssh/nse-keypair-prod.pem ubuntu@<PROD-IP>
 
 cd /opt/nse/backend
-/opt/nse/venv/bin/python3 - << 'EOF'
-import os; os.environ["STAGE"] = "prod"
-from app.db.dynamo import dynamo_users
-from app.core.security import hash_password
-import uuid, datetime
-dynamo_users.put_item(Item={
-    "user_id": str(uuid.uuid4()),
-    "username": "admin",
-    "email": "admin@example.com",
-    "full_name": "Admin User",
-    "role": "admin",
-    "hashed_password": hash_password("changeme123"),
-    "is_active": True,
-    "created_at": datetime.datetime.utcnow().isoformat(),
-})
-print("Prod admin created")
-EOF
+/opt/nse/venv/bin/python3 -c "
+from app.crud.user_dynamo import create
+user = create(username='admin', email='admin@example.com', full_name='Admin', role='admin', password='YOUR_PASSWORD')
+print('Created:', user['user_id'])
+"
 exit
 ```
 
@@ -461,19 +450,51 @@ exit
 
 ---
 
+### STEP 11 — Run Smoke Tests
+
+After both accounts are deployed and admin users are created, run the automated smoke tests to verify everything is working end-to-end.
+
+```bash
+# Test staging (10 API checks)
+make test-staging EC2_HOST=52.86.192.196
+
+# Test prod (same checks against prod)
+make test-prod EC2_HOST=3.6.181.22
+```
+
+This runs `infrastructure/scripts/test_staging.sh` and verifies:
+
+| # | Check | What it verifies |
+|---|-------|-----------------|
+| 1 | Health endpoint | Service is up and reachable |
+| 2 | Login → JWT token | Auth flow works end-to-end |
+| 3 | Stock analysis (RELIANCE.NS) | yfinance + calculation pipeline |
+| 4 | Global markets | Nifty/Sensex data endpoint |
+| 5 | Screener endpoint | List returns correctly |
+| 6 | Get own user profile | JWT auth on protected endpoint |
+| 7 | Menu list | Menu data accessible |
+| 8 | Create scraping job | SQS enqueue works |
+| 9 | List scraping jobs | DynamoDB query works |
+| 10 | Invalid token → 401 | Auth rejection working |
+
+All 10 must pass before the system is considered healthy.
+
+---
+
 ## Verify Everything Works
 
 ```bash
 # Health checks
-curl http://<STAGING-IP>/api/v1/health/   # → {"status":"ok","stage":"staging"}
-curl http://<PROD-IP>/api/v1/health/      # → {"status":"ok","stage":"prod"}
+curl http://52.86.192.196/api/v1/health/   # → {"status":"ok","stage":"staging"}
+curl http://3.6.181.22/api/v1/health/      # → {"status":"ok","stage":"prod"}
 
 # Frontend URLs
-# Staging: http://nse-frontend-<staging-id>.s3-website.ap-south-1.amazonaws.com
-# Prod:    http://nse-frontend-<prod-id>.s3-website.ap-south-1.amazonaws.com
+# Staging: http://nse-frontend-472353356905.s3-website.ap-south-1.amazonaws.com
+# Prod:    http://nse-frontend-019711414477.s3-website.ap-south-1.amazonaws.com
 
 # Automated smoke tests
-make test-staging EC2_HOST=<STAGING-IP>
+make test-staging EC2_HOST=52.86.192.196
+make test-prod    EC2_HOST=3.6.181.22
 ```
 
 ---

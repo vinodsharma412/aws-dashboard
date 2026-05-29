@@ -19,8 +19,10 @@
 11. [Adding a new frontend page](#11-adding-a-new-frontend-page)
 12. [Git workflow and CI/CD pipeline](#12-git-workflow-and-cicd-pipeline)
 13. [Environments — staging / prod](#13-environments--staging--prod)
-14. [QC testing guide](#14-qc-testing-guide)
-15. [Debugging guide](#15-debugging-guide)
+14. [Prod-only features](#14-prod-only-features)
+    - 14a. [PostgreSQL → DynamoDB migration](#14a-postgresql--dynamodb-migration)
+15. [QC testing guide](#15-qc-testing-guide)
+16. [Debugging guide](#16-debugging-guide)
 
 ---
 
@@ -28,30 +30,30 @@
 
 ### What is this project?
 
-A full-stack stock analysis dashboard. React frontend + FastAPI backend + DynamoDB database. Runs on AWS (EC2 + S3 + various managed services). Two isolated stages (staging + prod) on a single EC2 instance, promoted automatically via GitHub Actions.
+A full-stack stock analysis dashboard. React frontend + FastAPI backend + DynamoDB database. Runs on AWS (EC2 + S3 + various managed services). Two completely isolated AWS accounts — one for staging, one for prod — each with its own EC2, DynamoDB, S3, SQS, and SNS.
 
 ### Where is everything running?
 
 | What | URL |
 |------|-----|
-| **Frontend — Staging** | S3 bucket → `/staging/` folder |
-| **Frontend — Prod** | S3 bucket root `/` |
-| **API — Staging** | `http://<EC2_IP>/staging/api/v1/` |
-| **API — Prod** | `http://<EC2_IP>/api/v1/` |
-| **Swagger UI — Staging** | `http://<EC2_IP>/staging/docs` |
-| **Swagger UI — Prod** | `http://<EC2_IP>/docs` |
-| **Health check — Staging** | `http://<EC2_IP>/staging/api/v1/health/` |
-| **Health check — Prod** | `http://<EC2_IP>/api/v1/health/` |
+| **Frontend — Staging** | http://nse-frontend-472353356905.s3-website.ap-south-1.amazonaws.com |
+| **Frontend — Prod** | http://nse-frontend-019711414477.s3-website.ap-south-1.amazonaws.com |
+| **API — Staging** | `http://52.86.192.196/api/v1` |
+| **API — Prod** | `http://3.6.181.22/api/v1` |
+| **Swagger UI — Staging** | `http://52.86.192.196/docs` |
+| **Swagger UI — Prod** | `http://3.6.181.22/docs` |
+| **Health check — Staging** | `http://52.86.192.196/api/v1/health/` |
+| **Health check — Prod** | `http://3.6.181.22/api/v1/health/` |
 
-> EC2_IP is stored as the `EC2_HOST` GitHub secret. Check `Makefile` line 23 for how the local tooling picks it up from `.ec2-host`.
+> AWS account IDs: staging = `472353356905`, prod = `019711414477`. Each account has a dedicated EC2, DynamoDB, S3, SQS, and SNS — no shared infrastructure.
 
 ### What controls which stage you're talking to?
 
-The `STAGE` environment variable (set by systemd on EC2). It controls:
-- DynamoDB table names (`stg_users` vs `users`)
+The `STAGE` environment variable (set in `/opt/nse/.env` on each EC2). It controls:
+- DynamoDB table names (both accounts use identical clean names: `users`, `scraping_jobs`, etc. — isolation is at the account level, not via prefix)
 - SQS queue names (`nse-scraping-jobs-staging` vs `nse-scraping-jobs`)
 - SSM parameter paths (`/nse/staging/` vs `/nse/prod/`)
-- FastAPI `root_path` for Swagger URL prefixes
+- Prod environment banner (red "LIVE — PRODUCTION" bar shown in the frontend when `REACT_APP_STAGE=prod`)
 
 ### Quickstart (local, 5 minutes)
 
@@ -190,14 +192,14 @@ aws/
 │   ├── cloudwatch/setup_alarms.sh      ← CloudWatch alarms + dashboard
 │   └── scripts/
 │       ├── ec2_setup.sh             ← Install Python, Node, Nginx, Playwright on EC2
-│       ├── nginx.conf               ← Nginx: /staging/api/ → 9001, /api/ → 9000
-│       ├── nse-api.service          ← systemd unit for FastAPI (prod, port 9000)
-│       ├── nse-worker.service       ← systemd unit for SQS worker (prod)
-│       ├── nse-api-staging.service  ← systemd unit for FastAPI (staging, port 9001)
-│       ├── nse-worker-staging.service ← systemd unit for SQS worker (staging)
+│       ├── nginx.conf               ← Nginx: /api/ → 9000
+│       ├── nse-api.service          ← systemd unit for FastAPI (port 9000)
+│       ├── nse-worker.service       ← systemd unit for SQS worker
+│       ├── pg_to_dynamo.py          ← PostgreSQL → DynamoDB migration script
 │       └── test_staging.sh          ← Automated smoke tests run after staging deploy
 │
-├── .github/workflows/deploy.yml     ← CI/CD: lint → Staging → (approval) → PROD
+├── .github/workflows/ci.yml         ← CI only: lint + security scans + build check (develop/PR)
+├── .github/workflows/deploy.yml     ← Deploy pipeline: quality gate → staging → smoke tests → prod (main)
 ├── Makefile                         ← Developer shortcuts (run `make help`)
 ├── ruff.toml                        ← Python lint rules
 └── docs/                            ← Architecture, setup, this file
@@ -210,13 +212,12 @@ aws/
 ### Example: user searches a stock
 
 ```
-Browser: GET /staging/api/v1/stocks/analyse/TCS.NS
+Browser: GET /api/v1/stocks/analyse/TCS.NS
          Authorization: Bearer eyJhbGci...
             │
             ▼
-Nginx (/staging/api/ block in nginx.conf)
-  → strips /staging prefix
-  → proxies to 127.0.0.1:9001
+Nginx (/api/ block in nginx.conf)
+  → proxies to 127.0.0.1:9000
             │
             ▼
 FastAPI (backend/app/main.py)
@@ -229,7 +230,7 @@ backend/app/api/v1/endpoints/stocks.py
        → extracts Bearer token
        → decode_token(token) → username = "admin"   ← core/security.py
        → get_by_username("admin")                    ← crud/user_dynamo.py
-          → DynamoDB Query on stg_users table (staging)
+          → DynamoDB Query on users table
        → confirms user.is_active = True
   → calls stock_service.get_stock_analysis("TCS.NS") ← services/stock_service.py
        → checks in-memory cache (30 min TTL)
@@ -251,7 +252,7 @@ React: setAnalysis(data) → renders StockDashboard tabs
 ### Example: Amazon scraping job (async)
 
 ```
-1. POST /staging/api/v1/scraping/jobs  { asins: ["B09XYZ"] }
+1. POST /api/v1/scraping/jobs  { asins: ["B09XYZ"] }
    → creates job record in DynamoDB (status: pending)   ← crud/scraping_dynamo.py
    → calls scraping_queue.enqueue(task_ids)             ← services/scraping_queue.py
       → SQS SendMessage { task_id: "uuid" }
@@ -270,7 +271,7 @@ React: setAnalysis(data) → renders StockDashboard tabs
               → Lambda nse-dlq-alert fires → SNS email alert
 
 3. Frontend polls or uses SSE stream for live progress
-   GET /staging/api/v1/scraping/jobs/{job_id}/events  ← SSE (EventSource)
+   GET /api/v1/scraping/jobs/{job_id}/events  ← SSE (EventSource, direct to EC2 — bypasses API Gateway)
    → FastAPI yields progress updates as events
 ```
 
@@ -306,7 +307,7 @@ const api = axios.create({ baseURL: API_BASE_URL });
 
 At build time, `REACT_APP_API_URL` is injected:
 - **Local**: `http://localhost:9000/api/v1` (from frontend/.env)
-- **Staging build**: `http://<EC2_IP>/staging/api/v1` (from GitHub secret `STAGING_API_URL`)
+- **Staging build**: `http://52.86.192.196/api/v1` (from GitHub secret `STAGING_API_URL`)
 - **Prod build**: `http://<EC2_IP>/api/v1` (from GitHub secret `PROD_API_URL`)
 
 ### Role-based access
@@ -351,33 +352,34 @@ db/dynamo.py      ← Table object references. No logic.
 
 ## 6. DynamoDB tables
 
-All tables are defined in [backend/app/db/dynamo.py](../backend/app/db/dynamo.py). The stage prefix is applied automatically (`stg_` for staging, empty for prod).
+All tables are defined in [backend/app/db/dynamo.py](../backend/app/db/dynamo.py). Both staging and prod use the same table names — isolation is enforced at the AWS account level, not by a name prefix.
 
-| Variable | Staging table | Prod table | What it stores | Primary key | Notable GSIs |
-|----------|---------------|------------|----------------|-------------|--------------|
-| `dynamo_users` | `stg_users` | `users` | User accounts, roles, avatars | `user_id` | `username-index` |
-| `dynamo_transactions` | `stg_stock_transactions` | `stock_transactions` | Portfolio buy/sell history | `txn_id` | `user-transactions-index` |
-| `dynamo_watchlist` | `stg_stock_watchlist` | `stock_watchlist` | Saved symbols per user | `wl_id` | `user-watchlist-index`, `user-symbol-index` |
-| `dynamo_jobs` | `stg_scraping_jobs` | `scraping_jobs` | Amazon scraping job metadata | `job_id` | `user-jobs-index` |
-| `dynamo_tasks` | `stg_scraping_tasks` | `scraping_tasks` | Individual ASIN tasks within a job | `task_id` | `job-tasks-index`, `status-index` |
-| `dynamo_products` | `stg_product_data` | `product_data` | Scraped Amazon product results | `task_id` | — |
-| `dynamo_screener_cache` | `stg_screener_cache` | `screener_cache` | Pre-computed screener results | `cache_key` | — |
-| `dynamo_menus` | `stg_menus` | `menus` | Navigation menu definitions | `menu_id` | — |
-| `dynamo_menu_access` | `stg_menu_access` | `menu_access` | Role → menu permission matrix | `access_id` | `menu-index`, `role-index` |
-| `dynamo_email_messages` | `stg_email_messages` | `email_messages` | Inbound email messages | `message_id` | — |
-| `dynamo_email_sync_state` | `stg_email_sync_state` | `email_sync_state` | IMAP sync cursor (singleton) | `sync_key` | — |
-| `dynamo_product_master` | `stg_product_master` | `product_master` | Canonical product content | `product_id` | — |
-| `dynamo_word_suggestions` | `stg_word_suggestions` | `word_suggestions` | AI phrase suggestions | `suggestion_id` | — |
+| Variable | Table name (both accounts) | What it stores | Primary key | Notable GSIs |
+|----------|---------------------------|----------------|-------------|--------------|
+| `dynamo_users` | `users` | User accounts, roles, avatars | `user_id` | `username-index` |
+| `dynamo_transactions` | `stock_transactions` | Portfolio buy/sell history | `txn_id` | `user-transactions-index` |
+| `dynamo_watchlist` | `stock_watchlist` | Saved symbols per user | `wl_id` | `user-watchlist-index`, `user-symbol-index` |
+| `dynamo_jobs` | `scraping_jobs` | Amazon scraping job metadata | `job_id` | `user-jobs-index` |
+| `dynamo_tasks` | `scraping_tasks` | Individual ASIN tasks within a job | `task_id` | `job-tasks-index`, `status-index` |
+| `dynamo_products` | `product_data` | Scraped Amazon product results | `task_id` | — |
+| `dynamo_screener_cache` | `screener_cache` | Pre-computed screener results | `cache_key` | — |
+| `dynamo_menus` | `menus` | Navigation menu definitions | `menu_id` | — |
+| `dynamo_menu_access` | `menu_access` | Role → menu permission matrix | `access_id` | `menu-index`, `role-index` |
+| `dynamo_email_messages` | `email_messages` | Inbound email messages | `message_id` | — |
+| `dynamo_email_sync_state` | `email_sync_state` | IMAP sync cursor (singleton) | `sync_key` | — |
+| `dynamo_product_master` | `product_master` | Canonical product content | `product_id` | — |
+| `dynamo_word_suggestions` | `word_suggestions` | AI phrase suggestions | `suggestion_id` | — |
 
 > **Rule:** Always query via GSI, never scan. Scans read the whole table and consume read capacity. Every access pattern in this project uses a targeted Query.
 
-> **Isolation guarantee:** Staging uses `stg_` prefix — it is physically impossible for staging code to read or write prod data. Both stages share one AWS account and one EC2.
+> **Isolation guarantee:** Staging and prod are in separate AWS accounts (`472353356905` and `019711414477`). It is physically impossible for staging code to read or write prod data — they use different IAM credentials, different DynamoDB endpoints, and different SQS/S3 resources.
 
-### Create tables for a stage
+### Create tables for an account
 
 ```bash
-STAGE=staging python3 infrastructure/dynamodb/create_tables.py
-STAGE=prod    python3 infrastructure/dynamodb/create_tables.py
+# Run in the target account (set AWS_PROFILE or export credentials first)
+AWS_PROFILE=nse-staging python3 infrastructure/dynamodb/create_tables.py
+AWS_PROFILE=nse-prod    python3 infrastructure/dynamodb/create_tables.py
 ```
 
 ---
@@ -440,7 +442,7 @@ Every setting is in [backend/app/config.py](../backend/app/config.py). Reading i
 ### Startup order
 
 ```
-1. Systemd sets STAGE=staging (EnvironmentFile=/opt/nse-staging/.env)
+1. Systemd sets STAGE=staging (EnvironmentFile=/opt/nse/.env)
 2. Settings() reads backend/.env (pydantic-settings)
 3. get_settings() checks: is SECRET_KEY empty?
       → yes → calls _ssm_get("/nse/staging/jwt-secret")
@@ -463,18 +465,14 @@ SQS_SCRAPING_JOBS_URL=     # empty → falls back to in-memory queue
 
 ### How table names are derived
 
-```python
-# config.py
-@property
-def table_prefix(self) -> str:
-    # prod → ""      → table name: "users"
-    # staging → "stg_" → table name: "stg_users"
-    return "" if self.STAGE == "prod" else "stg_"
+Both accounts use identical clean table names — no prefix. Isolation is at the AWS account level.
 
+```python
 # db/dynamo.py
-_p = settings.table_prefix   # "stg_" or ""
-dynamo_users = _dynamodb.Table(f"{_p}users")
-# → "stg_users" in staging, "users" in prod
+dynamo_users = _dynamodb.Table("users")
+# → "users" in staging account, "users" in prod account
+# The boto3 client is initialized with account-specific credentials,
+# so the same name resolves to a different physical table in each account.
 ```
 
 ---
@@ -709,66 +707,98 @@ export const dismissAlert = (id) => api.delete(`/alerts/${id}`);
 ### Branch strategy
 
 ```
-main      ← production-only. Protected. Only CI/CD pushes here via promotion.
-develop   ← all development happens here. Push here to trigger the pipeline.
+main      ← releases / deployments only. Merge develop → main to trigger a deploy.
+develop   ← daily development work. Push here for CI checks (no deployment).
 ```
 
-**Never commit directly to `main`.** All changes go to `develop`.
+**Never commit directly to `main`.** All changes go to `develop`. When ready to deploy, merge develop → main.
 
-### What happens when you push
+### Two workflow files
+
+The project uses two separate GitHub Actions workflow files:
+
+**`.github/workflows/ci.yml`** — CI only, no deployment
+- Triggers on: push to `develop`, or PR to `main`
+- Runs: ruff lint, bandit security scan, pip-audit dependency audit, npm audit, frontend build check
+- Purpose: fast feedback during development — catches issues before they reach a deployment
+
+**`.github/workflows/deploy.yml`** — Full deploy pipeline
+- Triggers on: push to `main` only
+- Runs: quality gate → deploy staging → smoke tests → deploy prod (manual approval)
+
+### Daily development flow
 
 ```bash
+# Work on develop
 git add .
 git commit -m "feat: your change description"
 git push origin develop
+# → triggers ci.yml: lint + security scans + build check (~5 min)
+# → NO deployment
+```
+
+### Deploying to staging and prod
+
+```bash
+# When ready to deploy:
+git checkout main
+git merge develop
+git push origin main
+# → triggers deploy.yml
 ```
 
 ```
 GitHub Actions triggered: .github/workflows/deploy.yml
         │
         ▼
-┌───────────────┐
-│  Lint & Test  │  ruff check backend/app/ + npm ci
-│               │  Build staging frontend (PUBLIC_URL=/staging)
-│               │  Build prod frontend (PUBLIC_URL=/)
-│               │  Upload both as artifacts
-│               │  Takes ~3 min
-└──────┬────────┘
+┌────────────────┐
+│  Quality Gate  │  ruff lint + bandit security scan + pip-audit
+│                │  npm audit + frontend build check
+│                │  Takes ~5 min
+└──────┬─────────┘
        │ PASS
        ▼
-┌───────────────┐
-│ Deploy STAGING│  rsync backend → /opt/nse-staging/backend/
-│               │  pip install → restart nse-api-staging nse-worker-staging
-│               │  curl /staging/api/v1/health/ → must return 200
-│               │  Upload frontend artifact → S3 /staging/ folder
-└──────┬────────┘
-       │ PASS (health check)
+┌────────────────┐
+│ Deploy STAGING │  rsync backend → staging EC2 (52.86.192.196)
+│                │  pip install → restart services → health check
+│                │  Upload frontend → nse-frontend-472353356905 S3 bucket
+└──────┬─────────┘
+       │ PASS
        ▼
-┌───────────────┐
-│ ⏳ Approval   │  GitHub sends email to the reviewer
-│               │  Go to: GitHub → Actions → latest run → "Review deployments"
-└──────┬────────┘
+┌────────────────┐
+│  Smoke Tests   │  runs infrastructure/scripts/test_staging.sh
+│                │  10 API checks against staging (health, login, stocks,
+│                │  screener, user profile, menus, scraping, 401 check)
+│                │  ALL 10 must pass
+└──────┬─────────┘
+       │ PASS
+       ▼
+┌────────────────┐
+│ ⏳ Approval    │  GitHub sends email to the reviewer
+│                │  Go to: GitHub → Actions → latest run → "Review deployments"
+└──────┬─────────┘
        │ APPROVED
        ▼
-┌───────────────┐
-│  Deploy PROD  │  rsync backend → /opt/nse/backend/
-│               │  pip install → restart nse-api nse-worker
-│               │  curl /api/v1/health/ → must return 200
-│               │  Upload frontend artifact → S3 root
-└───────────────┘
+┌────────────────┐
+│  Deploy PROD   │  rsync backend → prod EC2 (3.6.181.22)
+│                │  pip install → restart services → health check
+│                │  Upload frontend → nse-frontend-019711414477 S3 bucket
+└────────────────┘
 ```
 
-**If any step fails** — all later stages are skipped automatically.
+**If any step fails** — all later stages are skipped automatically. Fix on `develop`, merge to `main` again.
 
 ### Monitor the pipeline
 
-GitHub → your repo → **Actions** tab → click the latest "Deploy Pipeline" run.
+GitHub → your repo → **Actions** tab → click the latest run.
+- Runs named **"CI"** were triggered by `ci.yml` (develop push / PR)
+- Runs named **"Deploy Pipeline"** were triggered by `deploy.yml` (main push)
 
 ### Approve PROD deployment
 
-GitHub → Actions → latest run → **"Review deployments"** button (bottom of page) → tick `prod` → **Approve and deploy**.
+GitHub → Actions → latest "Deploy Pipeline" run → **"Review deployments"** button → tick `prod` → **Approve and deploy**.
 
-### Lint before pushing
+### Lint and check before pushing
 
 ```bash
 make lint                        # ruff check (Python)
@@ -779,37 +809,53 @@ cd frontend && npm run build     # checks for JS/TypeScript errors
 
 ## 13. Environments — staging / prod
 
-Two stages on a **single EC2, single AWS account**. The `stg_` DynamoDB prefix ensures staging code can never touch production data.
+Staging and prod are **separate AWS accounts** — each has its own EC2, DynamoDB, S3, SQS, and SNS. There is no shared infrastructure.
 
 | | Staging | Prod |
 |-|---------|------|
+| **AWS account** | `472353356905` | `019711414477` |
 | **Purpose** | Pre-release testing — QC team validates here before approve | Live users |
-| **Deploy trigger** | Auto — every `develop` push (after lint passes) | Manual approval in GitHub |
-| **EC2 directory** | `/opt/nse-staging/` | `/opt/nse/` |
-| **FastAPI port** | 9001 | 9000 |
-| **API base URL** | `http://<EC2_HOST>/staging/api/v1` | `http://<EC2_HOST>/api/v1` |
-| **Swagger UI** | `http://<EC2_HOST>/staging/docs` | `http://<EC2_HOST>/docs` |
-| **systemd services** | `nse-api-staging`, `nse-worker-staging` | `nse-api`, `nse-worker` |
-| **DynamoDB tables** | `stg_users`, `stg_stock_transactions`… | `users`, `stock_transactions`… |
+| **Deploy trigger** | Auto — every `main` push (after quality gate + smoke tests pass) | Manual approval in GitHub Actions |
+| **EC2 IP** | `52.86.192.196` | `3.6.181.22` |
+| **EC2 directory** | `/opt/nse/` | `/opt/nse/` |
+| **FastAPI port** | 9000 | 9000 |
+| **API base URL** | `http://52.86.192.196/api/v1` | `http://3.6.181.22/api/v1` |
+| **Swagger UI** | `http://52.86.192.196/docs` | `http://3.6.181.22/docs` |
+| **systemd services** | `nse-api`, `nse-worker` | `nse-api`, `nse-worker` |
+| **DynamoDB tables** | `users`, `scraping_jobs`… (no prefix) | `users`, `scraping_jobs`… (no prefix) |
 | **SQS queue** | `nse-scraping-jobs-staging` | `nse-scraping-jobs` |
 | **SSM path** | `/nse/staging/` | `/nse/prod/` |
-| **Frontend S3** | `nse-frontend-<account-id>/staging/` | `nse-frontend-<account-id>/` root |
+| **Frontend S3** | `nse-frontend-472353356905` | `nse-frontend-019711414477` |
+| **Frontend URL** | http://nse-frontend-472353356905.s3-website.ap-south-1.amazonaws.com | http://nse-frontend-019711414477.s3-website.ap-south-1.amazonaws.com |
+| **Prod banner** | Not shown | Red "LIVE — PRODUCTION" bar shown when `REACT_APP_STAGE=prod` |
 
 ### GitHub Secrets required
 
 Set these in: **GitHub repo → Settings → Secrets and variables → Actions**
 
+**Staging secrets (7):**
+
 | Secret | Value |
 |--------|-------|
-| `EC2_HOST` | Your Elastic IP |
-| `EC2_SSH_KEY` | Full contents of `~/.ssh/nse-keypair.pem` (including BEGIN/END lines) |
-| `AWS_ACCESS_KEY_ID` | IAM access key |
-| `AWS_SECRET_ACCESS_KEY` | IAM secret key |
-| `S3_FRONTEND_BUCKET` | `nse-frontend-<your-account-id>` |
-| `STAGING_API_URL` | `http://<EC2_HOST>/staging/api/v1` |
-| `STAGING_SSE_URL` | `http://<EC2_HOST>` |
-| `PROD_API_URL` | `http://<EC2_HOST>/api/v1` |
-| `PROD_SSE_URL` | `http://<EC2_HOST>` |
+| `STAGING_EC2_HOST` | `52.86.192.196` |
+| `STAGING_EC2_SSH_KEY` | Full contents of `~/.ssh/nse-keypair-staging.pem` |
+| `STAGING_AWS_ACCESS_KEY_ID` | Staging IAM access key |
+| `STAGING_AWS_SECRET_ACCESS_KEY` | Staging IAM secret key |
+| `STAGING_S3_FRONTEND_BUCKET` | `nse-frontend-472353356905` |
+| `STAGING_API_URL` | `http://52.86.192.196/api/v1` |
+| `STAGING_SSE_URL` | `http://52.86.192.196` |
+
+**Prod secrets (7):**
+
+| Secret | Value |
+|--------|-------|
+| `EC2_HOST` | `3.6.181.22` |
+| `EC2_SSH_KEY` | Full contents of `~/.ssh/nse-keypair-prod.pem` |
+| `AWS_ACCESS_KEY_ID` | Prod IAM access key |
+| `AWS_SECRET_ACCESS_KEY` | Prod IAM secret key |
+| `S3_FRONTEND_BUCKET` | `nse-frontend-019711414477` |
+| `PROD_API_URL` | `http://3.6.181.22/api/v1` |
+| `PROD_SSE_URL` | `http://3.6.181.22` |
 
 ### GitHub Environments required
 
@@ -817,21 +863,81 @@ Set these in: **GitHub repo → Settings → Secrets and variables → Actions**
 
 | Environment | Protection |
 |-------------|-----------|
-| `staging` | None — auto-deploys on every push |
+| `staging` | None — auto-deploys on every main push (after smoke tests pass) |
 | `prod` | Required reviewers → add your GitHub username |
 
 ---
 
-## 14. QC testing guide
+## 14. Prod-only features
 
-Staging deploys automatically after every `develop` push. Before clicking **Approve and deploy** for prod, QC runs through these checks.
+### Production environment banner
+
+The frontend displays a red "LIVE — PRODUCTION" bar at the top of every page when `REACT_APP_STAGE=prod` is set at build time. This never appears on staging.
+
+- Set by the deploy workflow: staging builds use `REACT_APP_STAGE=staging`, prod builds use `REACT_APP_STAGE=prod`
+- Purpose: prevent accidentally treating the prod environment as staging during testing
+- The banner is rendered in the React app shell and cannot be dismissed
+
+### SNS login alert (prod only)
+
+When a user logs into the prod environment, an SNS email notification is sent containing the username, IP address, and timestamp. This is triggered by `auth_service.py` on successful login when `settings.STAGE == "prod"`.
+
+- Alerts go to the SNS topic configured in `/nse/prod/sns-alerts-arn` (SSM)
+- Staging logins do **not** trigger alerts
+- To disable: set `LOGIN_ALERTS_ENABLED=false` in `/opt/nse/.env` on the prod EC2 and restart `nse-api`
+
+---
+
+## 14a. PostgreSQL → DynamoDB migration
+
+If you are migrating data from an existing PostgreSQL instance, use the migration script:
+
+```
+infrastructure/scripts/pg_to_dynamo.py
+```
+
+**What it does:**
+- Auto-detects all tables in the PostgreSQL database
+- Migrates each table's rows to the corresponding DynamoDB table
+- Skips records that already exist in DynamoDB (idempotent — safe to re-run)
+
+**Usage:**
+
+```bash
+cd /path/to/aws
+
+# Set environment variables for the source PostgreSQL instance
+export PG_HOST=your-postgres-host
+export PG_PORT=5432
+export PG_DB=your-database-name
+export PG_USER=your-user
+export PG_PASSWORD=your-password
+
+# Set the target stage (uses that account's DynamoDB)
+export STAGE=staging   # or prod
+export AWS_PROFILE=nse-staging   # or nse-prod
+
+python3 infrastructure/scripts/pg_to_dynamo.py
+```
+
+**Notes:**
+- Run against staging first to verify the migration before touching prod
+- The script skips existing records, so it is safe to re-run after partial failures
+- DynamoDB table names must already exist (run `create_tables.py` first — see Step 5)
+
+---
+
+## 15. QC testing guide
+
+Staging deploys automatically on every `main` push (after the quality gate passes). Before clicking **Approve and deploy** for prod, QC runs through these checks.
 
 ### Automated smoke tests (run first)
 
-The CI/CD pipeline runs these automatically, but you can also run them manually:
+The CI/CD pipeline runs these automatically after each staging deploy, but you can also run them manually:
 
 ```bash
-make test-staging EC2_HOST=<ELASTIC-IP>
+make test-staging EC2_HOST=52.86.192.196
+make test-prod    EC2_HOST=3.6.181.22
 ```
 
 This runs `infrastructure/scripts/test_staging.sh` and checks 10 API endpoints:
@@ -897,7 +1003,7 @@ Open the staging frontend URL, log in with the staging admin account (`admin` / 
 - [ ] Viewer can access Dashboard and Stock Dashboard
 
 #### Error handling
-- [ ] Kill the staging API (`sudo systemctl stop nse-api-staging`) → frontend shows meaningful error, not blank white screen
+- [ ] Kill the staging API (`sudo systemctl stop nse-api`) → frontend shows meaningful error, not blank white screen
 - [ ] Restart the staging API → everything recovers without refresh
 
 ### After manual QC passes
@@ -920,20 +1026,20 @@ Do **not** approve prod deployment. Instead:
 
 ```bash
 # Check what's wrong
-make logs EC2_HOST=<IP>              # API logs
-make logs-worker EC2_HOST=<IP>       # Worker logs
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<IP>
+make logs EC2_HOST=52.86.192.196              # API logs
+make logs-worker EC2_HOST=52.86.192.196       # Worker logs
+ssh -i ~/.ssh/nse-keypair-staging.pem ubuntu@52.86.192.196
 
 # On EC2: check service status
-sudo systemctl status nse-api-staging
-sudo journalctl -u nse-api-staging -n 50 --no-pager
+sudo systemctl status nse-api
+sudo journalctl -u nse-api -n 50 --no-pager
 ```
 
 Fix the issue on `develop`, push again. The pipeline will re-run staging automatically.
 
 ---
 
-## 15. Debugging guide
+## 16. Debugging guide
 
 ### Step 1: figure out which layer is broken
 
@@ -951,18 +1057,20 @@ Browser shows error?
 ### Check EC2 service status
 
 ```bash
-# SSH into EC2
-ssh -i ~/.ssh/nse-keypair.pem ubuntu@<EC2_IP>
+# SSH into staging EC2
+ssh -i ~/.ssh/nse-keypair-staging.pem ubuntu@52.86.192.196
+
+# SSH into prod EC2
+ssh -i ~/.ssh/nse-keypair-prod.pem ubuntu@3.6.181.22
 
 # Is the service running?
-sudo systemctl status nse-api-staging
 sudo systemctl status nse-api
 
 # Live logs (Ctrl+C to stop)
-sudo journalctl -u nse-api-staging -f
+sudo journalctl -u nse-api -f
 
 # Last 50 log lines
-sudo journalctl -u nse-api-staging -n 50 --no-pager
+sudo journalctl -u nse-api -n 50 --no-pager
 ```
 
 Or from your local machine:
@@ -976,18 +1084,18 @@ make logs-worker       # staging worker logs
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `502 Bad Gateway` | FastAPI service not running | `sudo systemctl restart nse-api-staging` |
-| Service crashes at start | Missing `.env` or wrong Python path | `journalctl -u nse-api-staging -n 30` to see the error |
-| `ValidationError: SECRET_KEY` | Empty SECRET_KEY and SSM unreachable | Add `SECRET_KEY=any-string` to `/opt/nse-staging/.env` |
-| `Could not import module app.main` | Backend files not deployed | Run `make deploy STAGE=staging` |
-| `DynamoDB ResourceNotFoundException` | Tables don't exist for this stage | `STAGE=staging python3 infrastructure/dynamodb/create_tables.py` |
+| `502 Bad Gateway` | FastAPI service not running | `sudo systemctl restart nse-api` |
+| Service crashes at start | Missing `.env` or wrong Python path | `journalctl -u nse-api -n 30` to see the error |
+| `ValidationError: SECRET_KEY` | Empty SECRET_KEY and SSM unreachable | Add `SECRET_KEY=any-string` to `/opt/nse/.env` |
+| `Could not import module app.main` | Backend files not deployed | Run `make deploy EC2_HOST=<IP>` |
+| `DynamoDB ResourceNotFoundException` | Tables don't exist in this account | `AWS_PROFILE=nse-staging python3 infrastructure/dynamodb/create_tables.py` |
 | CI pipeline SSH fails (`Connection reset by peer`) | EC2 security group blocks GitHub IPs | Add SSH inbound rule: `0.0.0.0/0` in EC2 security group |
 | Health check returns 502 in CI | Service takes >40s to start | Already using 40s sleep; check `journalctl` for startup errors |
 | `No space left on device` | EC2 disk full | `sudo rm -rf ~/.cache/pip /tmp/pip-* && df -h` to verify |
 | Frontend shows old version | S3 cache | Hard refresh: `Ctrl+Shift+R` or clear browser cache |
 | Sentiment returns `"scored_by": "keywords"` | `COMPREHEND_ENABLED=false` in .env | Set `COMPREHEND_ENABLED=true` and restart service |
-| SQS messages stuck | Worker crashed | `sudo systemctl restart nse-worker-staging`, check worker logs |
-| Staging uses prod DynamoDB tables | `STAGE=prod` set in staging env | Check `/opt/nse-staging/.env` — must have `STAGE=staging` |
+| SQS messages stuck | Worker crashed | `sudo systemctl restart nse-worker`, check worker logs |
+| Staging writes to wrong account | Wrong AWS credentials in GitHub secrets | Check `STAGING_AWS_ACCESS_KEY_ID` secret — must be staging account (472353356905) |
 
 ### Trace a bug from browser to database
 
@@ -995,16 +1103,17 @@ make logs-worker       # staging worker logs
 # 1. Get the exact error from browser console (Network tab → failed request → Response)
 
 # 2. Reproduce it on the API directly (skip the frontend)
-curl -X GET "http://<EC2_IP>/staging/api/v1/stocks/analyse/TCS.NS" \
+# Staging:
+curl -X GET "http://52.86.192.196/api/v1/stocks/analyse/TCS.NS" \
   -H "Authorization: Bearer <your-jwt-token>"
-# Get a JWT token: POST /staging/api/v1/auth/token with username/password
+# Get a JWT token: POST http://52.86.192.196/api/v1/auth/token with username/password
 
 # 3. Check the logs for the matching request
-sudo journalctl -u nse-api-staging -n 100 --no-pager | grep "TCS.NS"
+sudo journalctl -u nse-api -n 100 --no-pager | grep "TCS.NS"
 
 # 4. Check DynamoDB if it's a data issue
 aws dynamodb get-item \
-  --table-name stg_users \
+  --table-name users \
   --key '{"user_id": {"S": "your-user-id"}}' \
   --region ap-south-1
 ```
@@ -1013,10 +1122,10 @@ aws dynamodb get-item \
 
 ```bash
 # On EC2, look at when the files were last synced
-ls -la /opt/nse-staging/backend/app/
+ls -la /opt/nse/backend/app/
 
 # Or check the git log on the GitHub Actions run
-# GitHub → Actions → latest "Deploy Staging" run → "Sync backend" step
+# GitHub → Actions → latest "Deploy Pipeline" run → "Deploy staging" step
 ```
 
 ### View logs in AWS Console
@@ -1025,4 +1134,4 @@ CloudWatch → Log groups → `/nse/api` → Log streams → latest stream
 
 ---
 
-*This guide covers the current state of the project. If something is wrong or out of date, the source of truth is the code itself — `backend/app/config.py` for settings, `backend/app/db/dynamo.py` for tables, and `.github/workflows/deploy.yml` for the pipeline.*
+*This guide covers the current state of the project. If something is wrong or out of date, the source of truth is the code itself — `backend/app/config.py` for settings, `backend/app/db/dynamo.py` for tables, `.github/workflows/ci.yml` for CI checks, and `.github/workflows/deploy.yml` for the deploy pipeline.*
