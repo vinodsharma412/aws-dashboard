@@ -47,7 +47,7 @@
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
 │  IAM Instance Profile: NSEStockDashboardEC2Role                            │
-│   (DynamoDB: all nse_* tables | S3: nse-assets-* bucket)                   │
+│   (DynamoDB: all tables in account | S3: nse-assets-* bucket)              │
 └─────────────┬───────────────────────────────┬───────────────────────────────┘
               │                               │
               ▼                               ▼
@@ -55,14 +55,19 @@
 │  AWS DynamoDB           │    │  AWS S3                                       │
 │  ap-south-1             │    │  ap-south-1                                   │
 │                         │    │                                               │
-│  Tables:                │    │  nse-frontend-<id>  (static website)         │
-│  nse_users              │    │   React build files (public read)            │
-│  nse_stock_transactions │    │                                               │
-│  nse_stock_watchlist    │    │  nse-assets-<id>  (private)                  │
-│  nse_scraping_jobs      │    │   avatars/user_*.jpg                         │
-│  nse_scraping_tasks     │    │   (signed URL or public per object)          │
-│  nse_product_data       │    │                                               │
+│  Tables (no prefix —    │    │  nse-frontend-<account-id>  (static website) │
+│  accounts are isolated):│    │   React build files (public read)            │
+│  users                  │    │                                               │
+│  stock_transactions     │    │  nse-assets-<account-id>  (private)          │
+│  stock_watchlist        │    │   avatars/user_*.jpg                         │
+│  scraping_jobs          │    │   (signed URL or public per object)          │
+│  scraping_tasks         │    │                                               │
+│  product_data           │    │                                               │
 └─────────────────────────┘    └──────────────────────────────────────────────┘
+
+NOTE: Staging and prod are separate AWS accounts (472353356905 and 019711414477).
+Each account has its own EC2, DynamoDB, S3, SQS, and SNS — no shared infrastructure.
+Table names are identical in both accounts (no prefix needed — isolation is at account level).
 
 ── Background automation (EventBridge + Lambda) ──────────────────────────────
 
@@ -233,16 +238,16 @@ events.put_events({                                     → sends email via SES
 
 | Endpoint | Table | Operation | Index Used |
 |---|---|---|---|
-| Login | nse_users | Query | username-index GSI |
-| Get user by ID | nse_users | GetItem | Primary key |
-| List all users | nse_users | Scan | — (admin only) |
-| Portfolio | nse_stock_transactions | Query | user-transactions-index GSI |
-| Watchlist | nse_stock_watchlist | Query | user-watchlist-index GSI |
-| Check dupe symbol | nse_stock_watchlist | Query | user-symbol-index GSI |
-| List jobs | nse_scraping_jobs | Query | user-jobs-index GSI |
-| Job tasks | nse_scraping_tasks | Query | job-tasks-index GSI |
-| Pending tasks | nse_scraping_tasks | Query | status-index GSI |
-| Product data | nse_product_data | GetItem | Primary key (task_id) |
+| Login | users | Query | username-index GSI |
+| Get user by ID | users | GetItem | Primary key |
+| List all users | users | Scan | — (admin only) |
+| Portfolio | stock_transactions | Query | user-transactions-index GSI |
+| Watchlist | stock_watchlist | Query | user-watchlist-index GSI |
+| Check dupe symbol | stock_watchlist | Query | user-symbol-index GSI |
+| List jobs | scraping_jobs | Query | user-jobs-index GSI |
+| Job tasks | scraping_tasks | Query | job-tasks-index GSI |
+| Pending tasks | scraping_tasks | Query | status-index GSI |
+| Product data | product_data | GetItem | Primary key (task_id) |
 
 **Key insight:** Every access pattern uses a GSI Query, NOT a Scan.
 Scan reads the entire table — expensive in DynamoDB (costs RCU).
@@ -252,17 +257,22 @@ GSI Query reads only matching items — efficient and within free tier.
 
 ## Free Tier Cost Estimate
 
-| Service | Monthly Usage | Free Tier | Estimated Cost |
+Staging and prod are in **separate AWS accounts**. Each account has its own free tier allowance.
+
+| Service | Per-account usage | Free Tier (per account) | Cost per account |
 |---|---|---|---|
 | EC2 t2.micro | 720 h | 750 h ✅ | $0 |
 | S3 storage | ~200 MB | 5 GB ✅ | $0 |
 | S3 requests | ~5,000 | 20K GET ✅ | $0 |
 | DynamoDB storage | ~100 MB | 25 GB ✅ | $0 |
 | DynamoDB RCU | ~500K | 25 × 2.5M ✅ | $0 |
-| API Gateway | ~10K req/mo | 1M/mo ✅ | $0 |
+| API Gateway (optional) | ~10K req/mo | 1M/mo ✅ | $0 |
 | Lambda | ~1,000 runs | 1M/mo ✅ | $0 |
 | CloudWatch logs | ~1 GB | 5 GB ✅ | $0 |
 | Data transfer out | ~500 MB | 1 GB ✅ | $0 |
-| **TOTAL** | | | **$0/mo** |
+| **TOTAL (per account)** | | | **$0/mo** |
+| **TOTAL (both accounts)** | | | **$0/mo** |
 
-After 12-month free tier, estimated cost: **~$15-20/month**
+Both accounts run within free tier independently. After 12-month free tier (EC2/S3 — DynamoDB and Lambda are free forever), estimated cost: **~$15-20/month per account** (~$30-40/month total).
+
+> **API Gateway note:** API Gateway is shown in the architecture diagram as an optional future entry point for REST calls. The project currently routes REST traffic directly to EC2 Nginx. API Gateway can be added later for rate limiting, HTTPS termination, and throttling without changing backend code.
