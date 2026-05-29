@@ -28,7 +28,7 @@ import logging
 import re
 import time
 import urllib.parse
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import unescape
 from typing import List, Optional
