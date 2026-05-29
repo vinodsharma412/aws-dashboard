@@ -33,3 +33,4 @@ playwright>=1.45.1
 
 # ── Starlette (ASGI, middleware, streaming) ────────────────────────────────────
 starlette>=0.38.4
+defusedxml>=0.7.1

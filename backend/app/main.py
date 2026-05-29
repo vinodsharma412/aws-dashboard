@@ -44,8 +44,10 @@ async def lifespan(_app: FastAPI):
     """
     worker = None
     if _WORKER_SCRIPT.exists():
-        cmd = f'exec "{sys.executable}" "{_WORKER_SCRIPT}"'
-        worker = subprocess.Popen(cmd, shell=True, start_new_session=True)
+        worker = subprocess.Popen(
+            [sys.executable, str(_WORKER_SCRIPT)],
+            start_new_session=True,
+        )
     try:
         yield
     finally:
